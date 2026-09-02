@@ -1,0 +1,10 @@
+{
+  "name": "the-pizza-house/backend",
+  "description": "PHP backend for The Pizza House restaurant ordering website",
+  "type": "project",
+  "license": "proprietary",
+  "require": {
+    "php": ">=8.2",
+    "minishlink/web-push": "^9.0"
+  }
+}
