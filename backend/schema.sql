@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS users (
   role ENUM('customer','admin','delivery_boy') NOT NULL DEFAULT 'customer',
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_users_role_active (role, is_active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -17,6 +18,7 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
   password_hash_snapshot CHAR(64) NULL,
   expires_at DATETIME NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_auth_tokens_user_expires (user_id, expires_at),
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -39,10 +41,12 @@ CREATE TABLE IF NOT EXISTS categories (
   name VARCHAR(120) NOT NULL,
   slug VARCHAR(140) NOT NULL UNIQUE,
   description TEXT NULL,
+  image_url VARCHAR(500) NULL,
   sort_order INT NOT NULL DEFAULT 0,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_categories_active_sort (is_active, sort_order, name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS menu_items (
@@ -58,6 +62,8 @@ CREATE TABLE IF NOT EXISTS menu_items (
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_menu_items_active_category (is_active, category_id, name),
+  INDEX idx_menu_items_stock (stock),
   FOREIGN KEY (category_id) REFERENCES categories(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -71,6 +77,7 @@ CREATE TABLE IF NOT EXISTS menu_item_variants (
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_variants_item_active (menu_item_id, is_active, sort_order),
   UNIQUE KEY menu_item_variant_unique (menu_item_id, name),
   FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -98,6 +105,7 @@ CREATE TABLE IF NOT EXISTS menu_item_options (
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_options_group_active (group_id, is_active),
   FOREIGN KEY (group_id) REFERENCES menu_option_groups(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -126,7 +134,8 @@ CREATE TABLE IF NOT EXISTS coupons (
   per_customer_limit INT NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_coupons_active_code_dates (code, is_active, starts_at, expires_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS coupon_redemptions (
@@ -135,6 +144,8 @@ CREATE TABLE IF NOT EXISTS coupon_redemptions (
   user_id BIGINT UNSIGNED NULL,
   order_id BIGINT UNSIGNED NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_coupon_redemptions_coupon_user (coupon_id, user_id),
+  INDEX idx_coupon_redemptions_order (order_id),
   FOREIGN KEY (coupon_id) REFERENCES coupons(id),
   FOREIGN KEY (user_id) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -150,7 +161,8 @@ CREATE TABLE IF NOT EXISTS offers (
   expires_at DATETIME NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_offers_active_scope_dates (is_active, scope, scope_id, starts_at, expires_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS delivery_slabs (
@@ -161,7 +173,60 @@ CREATE TABLE IF NOT EXISTS delivery_slabs (
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_delivery_slabs_active_range (is_active, min_km, max_km),
   UNIQUE KEY delivery_range_unique (min_km, max_km)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS promotional_banners (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(160) NOT NULL,
+  subtitle TEXT NULL,
+  image_url VARCHAR(500) NOT NULL,
+  button_text VARCHAR(80) NULL,
+  destination_type ENUM('none','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
+  destination_value VARCHAR(500) NULL,
+  display_order INT NOT NULL DEFAULT 0,
+  start_at DATETIME NULL,
+  end_at DATETIME NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_promotional_banners_active (is_active, display_order),
+  INDEX idx_promotional_banners_dates (start_at, end_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS promotional_marquee (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  message TEXT NOT NULL,
+  link VARCHAR(500) NULL,
+  display_order INT NOT NULL DEFAULT 0,
+  start_at DATETIME NULL,
+  end_at DATETIME NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_promotional_marquee_active (is_active, display_order),
+  INDEX idx_promotional_marquee_dates (start_at, end_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS promotional_popups (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(160) NOT NULL,
+  description TEXT NULL,
+  image_url VARCHAR(500) NULL,
+  offer_text VARCHAR(160) NULL,
+  button_text VARCHAR(80) NULL,
+  destination_type ENUM('none','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
+  destination_value VARCHAR(500) NULL,
+  display_frequency ENUM('session','daily','every_visit') NOT NULL DEFAULT 'session',
+  display_order INT NOT NULL DEFAULT 0,
+  start_at DATETIME NULL,
+  end_at DATETIME NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_promotional_popups_active (is_active, display_order),
+  INDEX idx_promotional_popups_dates (start_at, end_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -212,6 +277,10 @@ CREATE TABLE IF NOT EXISTS orders (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_orders_guest_token (guest_access_token_hash),
+  INDEX idx_orders_user_created (user_id, created_at),
+  INDEX idx_orders_status_created (status, created_at),
+  INDEX idx_orders_payment_status (payment_status),
+  INDEX idx_orders_delivery_boy_status (delivery_boy_id, status),
   FOREIGN KEY (user_id) REFERENCES users(id),
   FOREIGN KEY (delivery_boy_id) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (coupon_id) REFERENCES coupons(id)
@@ -229,6 +298,7 @@ CREATE TABLE IF NOT EXISTS order_items (
   quantity INT NOT NULL,
   free_quantity INT NOT NULL DEFAULT 0,
   line_total DECIMAL(10,2) NOT NULL,
+  INDEX idx_order_items_order (order_id, id),
   FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
   FOREIGN KEY (menu_item_id) REFERENCES menu_items(id),
   FOREIGN KEY (variant_id) REFERENCES menu_item_variants(id) ON DELETE SET NULL
@@ -245,6 +315,7 @@ CREATE TABLE IF NOT EXISTS payments (
   raw_payload JSON NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_payments_order_status (order_id, status),
   FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -257,6 +328,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   status ENUM('queued','sent','failed') NOT NULL DEFAULT 'queued',
   provider_response JSON NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_notifications_status_created (status, created_at),
   FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -298,6 +370,7 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   p256dh TEXT NOT NULL,
   auth TEXT NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_push_subscriptions_user (user_id),
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -308,6 +381,7 @@ CREATE TABLE IF NOT EXISTS order_status_history (
   new_status VARCHAR(40) NOT NULL,
   changed_by BIGINT UNSIGNED NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_order_status_history_order_created (order_id, created_at),
   FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
   FOREIGN KEY (changed_by) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -7,8 +7,19 @@ function load_env_file(string $path): void {
         $line = trim($line);
         if ($line === '' || str_starts_with($line, '#') || !str_contains($line, '=')) continue;
         [$key, $value] = explode('=', $line, 2);
-        putenv(trim($key) . '=' . trim($value));
+        putenv(trim($key) . '=' . parse_env_value(trim($value)));
     }
+}
+
+function parse_env_value(string $value): string {
+    if (strlen($value) >= 2) {
+        $first = $value[0];
+        $last = $value[strlen($value) - 1];
+        if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
+            return stripcslashes(substr($value, 1, -1));
+        }
+    }
+    return $value;
 }
 
 function env_value(string $key, string $default = ''): string {

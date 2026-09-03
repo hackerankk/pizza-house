@@ -1,44 +1,85 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ChevronRight, Menu, Minus, Plus, Search, ShoppingBag, Trash2, UserRound, X } from 'lucide-react';
 import { api, applyTheme, inr, productImage, readCart, saveCart, token } from './lib';
 
-function Header({ theme, cartCount, customer, onCartOpen }) {
+function destinationHref(item) {
+  if (!item || item.destination_type === 'none') return '';
+  if (item.destination_type === 'custom_url') return item.destination_value || '';
+  if (item.destination_type === 'category') return `#category-${item.destination_value}`;
+  if (item.destination_type === 'product') return `#product-${item.destination_value}`;
+  if (item.destination_type === 'offer') return '#offers';
+  return '';
+}
+
+function Header({ theme, cartCount, viewer, onCartOpen }) {
   const [open, setOpen] = useState(false);
-  const links = (
-    <>
-      <a href="#menu">Menu</a>
-      <button className="nav-button" onClick={onCartOpen}>Cart</button>
-      {customer ? <Link href="/account">My Account</Link> : <Link href="/login">Login</Link>}
-      <Link href="/admin">Admin</Link>
-    </>
-  );
+  const customer = viewer?.role === 'customer' ? viewer : null;
+  const close = () => setOpen(false);
+  const links = [
+    ['Home', '/'],
+    ['Menu', '#menu'],
+    ['Offers', '#offers'],
+    ['Track Order', customer ? '/account' : '/login?return_to=/account']
+  ];
+  if (customer) links.push(['My Account', '/account']);
+  if (!viewer) links.push(['Login', '/login']);
+  if (viewer?.role === 'admin') links.push(['Admin', '/admin']);
+  if (viewer?.role === 'delivery_boy') links.push(['Delivery', '/delivery']);
+
+  useEffect(() => {
+    if (!open) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = event => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
 
   return (
-    <header className="site-header">
-      <div className="container header-inner">
-        <Link href="/" className="brand mark">
-          {theme.logo_url ? <img src={theme.logo_url} alt="The Pizza House logo" /> : <span className="brand-icon">TP</span>}
-          <span>The Pizza House</span>
-        </Link>
-        <nav className="desktop-nav">{links}</nav>
-        <div className="header-actions">
-          {customer ? <Link className="nav-account-pill" href="/account"><UserRound size={16} /> {customer.name}</Link> : <Link className="nav-account-pill login-pill" href="/login">Login</Link>}
-          <button className="cart-pill" onClick={onCartOpen} aria-label={`${cartCount} items in cart`}><ShoppingBag size={18} /><span>{cartCount}</span></button>
-          <button className="icon-button mobile-only" onClick={() => setOpen(true)} aria-label="Open menu"><Menu size={20} /></button>
+    <>
+      <header className="site-header">
+        <div className="container header-inner">
+          <Link href="/" className="brand mark">
+            {theme.logo_url ? <img src={theme.logo_url} alt="The Pizza House logo" /> : <span className="brand-icon">TP</span>}
+            <span>The Pizza House</span>
+          </Link>
+          <nav className="desktop-nav">
+            {links.map(([label, href]) => <Link key={label} href={href}>{label}</Link>)}
+          </nav>
+          <div className="header-actions">
+            <button className="cart-pill desktop-cart-button" onClick={onCartOpen} aria-label={`${cartCount} items in cart`}><ShoppingBag size={18} /><span>{cartCount}</span></button>
+            <button className="icon-button hamburger-button" onClick={() => setOpen(true)} aria-label="Open menu"><Menu size={20} /></button>
+          </div>
         </div>
-      </div>
+      </header>
       {open ? (
-        <div className="mobile-menu">
+        <div className="mobile-menu-shell" aria-hidden={!open}>
+          <button className="mobile-menu-backdrop" onClick={close} aria-label="Close menu backdrop" />
           <div className="mobile-menu-panel">
-            <div className="row"><strong>Navigation</strong><button className="icon-button" onClick={() => setOpen(false)} aria-label="Close menu"><X size={20} /></button></div>
-            <nav onClick={() => setOpen(false)}>{links}</nav>
+            <div className="mobile-drawer-header">
+              <Link href="/" className="brand mark" onClick={close}>
+                {theme.logo_url ? <img src={theme.logo_url} alt="The Pizza House logo" /> : <span className="brand-icon">TP</span>}
+                <span>The Pizza House</span>
+              </Link>
+              <button className="icon-button" onClick={close} aria-label="Close menu"><X size={20} /></button>
+            </div>
+            {customer ? <div className="drawer-customer"><UserRound size={18} /><span>{customer.name}</span></div> : null}
+            <nav className="mobile-drawer-nav">
+              {links.map(([label, href]) => <Link key={label} href={href} onClick={close}>{label}</Link>)}
+              <button className="nav-button" onClick={() => { close(); onCartOpen(); }}>Cart ({cartCount})</button>
+            </nav>
           </div>
         </div>
       ) : null}
-    </header>
+    </>
   );
 }
 
@@ -82,6 +123,129 @@ function CartPanel({ cart, subtotal, couponCode, onCoupon, onQty, onClose, drawe
       </div>
       <Link className={cart.length ? 'button full-width' : 'button full-width disabled-link'} href={cart.length ? '/checkout' : '#menu'}>Checkout <ChevronRight size={18} /></Link>
     </aside>
+  );
+}
+
+function PromotionMarquee({ messages }) {
+  if (!messages.length) return null;
+  const content = [...messages, ...messages];
+  return (
+    <section className="promo-marquee" id="offers" aria-label="Current offers">
+      <div className="promo-marquee-track">
+        {content.map((item, index) => {
+          const body = <span>{item.message}</span>;
+          return item.link
+            ? <a href={item.link} key={`${item.id}-${index}`}>{body}</a>
+            : <span className="promo-marquee-item" key={`${item.id}-${index}`}>{body}</span>;
+        })}
+      </div>
+    </section>
+  );
+}
+
+function PromoBannerCarousel({ banners }) {
+  const [index, setIndex] = useState(0);
+  const touchStartRef = useRef(null);
+
+  useEffect(() => {
+    if (banners.length <= 1) return undefined;
+    const timer = setInterval(() => setIndex(current => (current + 1) % banners.length), 5000);
+    return () => clearInterval(timer);
+  }, [banners.length]);
+
+  useEffect(() => {
+    setIndex(0);
+  }, [banners.length]);
+
+  if (!banners.length) return null;
+  const current = banners[index] || banners[0];
+  const href = destinationHref(current);
+  const image = productImage(current);
+  const previous = () => setIndex(currentIndex => (currentIndex - 1 + banners.length) % banners.length);
+  const next = () => setIndex(currentIndex => (currentIndex + 1) % banners.length);
+  const onTouchEnd = event => {
+    if (touchStartRef.current === null) return;
+    const delta = event.changedTouches[0].clientX - touchStartRef.current;
+    touchStartRef.current = null;
+    if (Math.abs(delta) < 40) return;
+    delta > 0 ? previous() : next();
+  };
+  const inner = (
+    <>
+      <img src={image} alt={current.title} loading={index === 0 ? 'eager' : 'lazy'} />
+      <div className="promo-banner-copy">
+        <span className="eyebrow">Featured offer</span>
+        <h2>{current.title}</h2>
+        {current.subtitle ? <p>{current.subtitle}</p> : null}
+        {current.button_text && href ? <span className="button">{current.button_text}</span> : null}
+      </div>
+    </>
+  );
+  return (
+    <section className="container promo-carousel" aria-label="Promotional banners">
+      <div className="promo-banner" onTouchStart={event => { touchStartRef.current = event.touches[0].clientX; }} onTouchEnd={onTouchEnd}>
+        {href ? <a className="promo-banner-link" href={href}>{inner}</a> : <div className="promo-banner-link">{inner}</div>}
+        {banners.length > 1 ? (
+          <>
+            <button className="promo-arrow previous" onClick={previous} aria-label="Previous promotion">‹</button>
+            <button className="promo-arrow next" onClick={next} aria-label="Next promotion">›</button>
+            <div className="promo-dots">{banners.map((banner, dotIndex) => <button key={banner.id} className={dotIndex === index ? 'active' : ''} onClick={() => setIndex(dotIndex)} aria-label={`Show promotion ${dotIndex + 1}`} />)}</div>
+          </>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function OfferPopup({ popup }) {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (!popup) return undefined;
+    const key = `pizza_house_popup_${popup.id}`;
+    const today = new Date().toISOString().slice(0, 10);
+    const seenSession = sessionStorage.getItem(key) === '1';
+    const seenDay = localStorage.getItem(key) === today;
+    if ((popup.display_frequency === 'session' && seenSession) || (popup.display_frequency === 'daily' && seenDay)) return undefined;
+    const timer = setTimeout(() => setVisible(true), 10000);
+    const onKey = event => {
+      if (event.key === 'Escape') {
+        if (popup.display_frequency === 'daily') localStorage.setItem(key, today);
+        if (popup.display_frequency !== 'every_visit') sessionStorage.setItem(key, '1');
+        setVisible(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [popup]);
+
+  if (!popup || !visible) return null;
+  const href = destinationHref(popup);
+  const markSeen = () => {
+    const key = `pizza_house_popup_${popup.id}`;
+    const today = new Date().toISOString().slice(0, 10);
+    if (popup.display_frequency === 'daily') localStorage.setItem(key, today);
+    if (popup.display_frequency !== 'every_visit') sessionStorage.setItem(key, '1');
+  };
+  const close = () => {
+    markSeen();
+    setVisible(false);
+  };
+  return (
+    <div className="offer-popup-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}>
+      <section className="offer-popup" role="dialog" aria-modal="true" aria-label="Special offer">
+        <button className="icon-button popup-close" onClick={close} aria-label="Close offer"><X size={18} /></button>
+        {popup.image_url ? <img src={productImage(popup)} alt="" loading="lazy" /> : null}
+        <span className="eyebrow">Special offer</span>
+        <h2>{popup.title}</h2>
+        {popup.description ? <p>{popup.description}</p> : null}
+        {popup.offer_text ? <strong className="offer-code">{popup.offer_text}</strong> : null}
+        {popup.button_text && href ? <a className="button full-width" href={href} onClick={close}>{popup.button_text}</a> : null}
+      </section>
+    </div>
   );
 }
 
@@ -227,14 +391,15 @@ export default function Home() {
   const [messageType, setMessageType] = useState('info');
   const [modalItem, setModalItem] = useState(null);
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
-  const [customer, setCustomer] = useState(null);
+  const [viewer, setViewer] = useState(null);
+  const [promotions, setPromotions] = useState({ banners: [], marquee: [], popup: null });
 
   useEffect(() => {
     setCart(readCart());
     setCartReady(true);
     setCouponCode(localStorage.getItem('pizza_house_coupon') || '');
-    Promise.all([api('/theme'), api('/settings'), api('/menu')])
-      .then(([t, s, m]) => {
+    Promise.all([api('/theme'), api('/settings'), api('/menu'), api('/promotions')])
+      .then(([t, s, m, p]) => {
         const uniqueItems = Array.from(new Map((m.items || []).map(item => [String(item.id), item])).values());
         setTheme(t.theme || {});
         applyTheme(t.theme || {});
@@ -242,11 +407,12 @@ export default function Home() {
         setCategories(m.categories || []);
         setItems(uniqueItems);
         setOptionGroups(m.option_groups || []);
+        setPromotions({ banners: p.banners || [], marquee: p.marquee || [], popup: p.popup || null });
       })
       .catch(err => notify(err.message, 'error'));
     if (token()) {
       api('/auth/me').then(data => {
-        if (data.user?.role === 'customer') setCustomer(data.user);
+        setViewer(data.user || null);
       }).catch(() => {});
     }
   }, []);
@@ -294,6 +460,7 @@ export default function Home() {
     if (category.id === 'all') {
       return 'https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=300&q=80';
     }
+    if (category.image_url) return productImage(category);
     const categoryItems = items.filter(item => String(item.category_id) === String(category.id));
     const withImage = categoryItems.find(item => item.image_url);
     if (withImage) return productImage(withImage);
@@ -369,7 +536,7 @@ export default function Home() {
 
   return (
     <div className="shell food-shell">
-      <Header theme={theme} cartCount={cartCount} customer={customer} onCartOpen={() => setCartDrawerOpen(true)} />
+      <Header theme={theme} cartCount={cartCount} viewer={viewer} onCartOpen={() => setCartDrawerOpen(true)} />
       <main>
         <section className="food-hero">
           <div className="container food-hero-inner">
@@ -382,12 +549,12 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="menu-sticky-bar" id="menu">
+        <section className="menu-sticky-bar" id="categories">
           <div className="container menu-toolbar">
             <div className="search-box"><Search size={18} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search menu" /></div>
             <div className="category-rail" aria-label="Menu categories">
               {[{ id: 'all', name: 'All' }, ...categories].map(category => (
-                <button className={String(activeCategory) === String(category.id) ? 'category-tile active' : 'category-tile'} onClick={() => selectCategory(category.id)} key={category.id}>
+                <button id={`category-${category.id}`} className={String(activeCategory) === String(category.id) ? 'category-tile active' : 'category-tile'} onClick={() => selectCategory(category.id)} key={category.id}>
                   <img src={categoryImage(category)} alt="" onError={event => { event.currentTarget.src = categoryFallback(category.name); }} />
                   <span>{category.name}</span>
                 </button>
@@ -396,9 +563,12 @@ export default function Home() {
           </div>
         </section>
 
+        <PromotionMarquee messages={promotions.marquee} />
+        <PromoBannerCarousel banners={promotions.banners} />
+
         <div className="container">{message ? <p className={`notice ${messageType}`}>{message}</p> : null}</div>
 
-        <section className="container food-layout">
+        <section className="container food-layout" id="menu">
           <div className="menu-feed">
             <div className="feed-heading">
               <div>
@@ -413,7 +583,7 @@ export default function Home() {
                 const from = startingPrice(item);
                 const inCart = cart.filter(line => Number(line.id) === Number(item.id)).reduce((sum, line) => sum + line.quantity, 0);
                 return (
-                  <article className="food-card" key={item.id}>
+                  <article className="food-card" id={`product-${item.id}`} key={item.id}>
                     <div className="food-card-copy">
                       <h3>{item.name}</h3>
                       <strong className="price">{(item.variants || []).length > 1 ? `From ${inr(from)}` : inr(from)}</strong>
@@ -448,6 +618,7 @@ export default function Home() {
       ) : null}
 
       <OptionModal item={modalItem} optionGroups={optionGroups} onClose={() => setModalItem(null)} onAdd={addLine} />
+      <OfferPopup popup={promotions.popup} />
       <footer className="footer"><div className="container footer-grid"><strong>The Pizza House</strong><span>{settings.restaurant_address || 'Fresh pizza delivered locally'}</span></div></footer>
     </div>
   );

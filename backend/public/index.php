@@ -5,6 +5,7 @@ ini_set('display_errors', '0');
 date_default_timezone_set('Asia/Kolkata');
 
 set_exception_handler(function (Throwable $e): void {
+    error_log('[The Pizza House] Unhandled API error: ' . $e->getMessage());
     json_response(['error' => 'Server error', 'detail' => getenv('APP_ENV') === 'local' ? $e->getMessage() : null], 500);
 });
 
@@ -20,6 +21,15 @@ header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     http_response_code(204);
     exit;
+}
+
+class ApiException extends RuntimeException {
+    public int $status;
+
+    public function __construct(string $message, int $status = 422) {
+        parent::__construct($message);
+        $this->status = $status;
+    }
 }
 
 function load_env(string $path): void {
@@ -81,6 +91,12 @@ function ensure_order_management_schema(): void {
     $existingUserColumns = array_column($userColumns->fetchAll(), 'COLUMN_NAME');
     if (!in_array('is_active', $existingUserColumns, true)) {
         $pdo->exec('ALTER TABLE users ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER role');
+    }
+    $categoryColumns = $pdo->prepare('SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?');
+    $categoryColumns->execute([$dbName, 'categories']);
+    $existingCategoryColumns = array_column($categoryColumns->fetchAll(), 'COLUMN_NAME');
+    if (!in_array('image_url', $existingCategoryColumns, true)) {
+        $pdo->exec('ALTER TABLE categories ADD COLUMN image_url VARCHAR(500) NULL AFTER description');
     }
     $tokenColumns = $pdo->prepare('SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?');
     $tokenColumns->execute([$dbName, 'auth_tokens']);
@@ -148,6 +164,27 @@ function ensure_order_management_schema(): void {
     if ((int)$indexStmt->fetchColumn() === 0) {
         $pdo->exec('CREATE INDEX idx_orders_guest_token ON orders (guest_access_token_hash)');
     }
+    ensure_index('auth_tokens', 'idx_auth_tokens_user_expires', 'user_id, expires_at');
+    ensure_index('users', 'idx_users_role_active', 'role, is_active');
+    ensure_index('categories', 'idx_categories_active_sort', 'is_active, sort_order, name');
+    ensure_index('menu_items', 'idx_menu_items_active_category', 'is_active, category_id, name');
+    ensure_index('menu_items', 'idx_menu_items_stock', 'stock');
+    ensure_index('menu_item_variants', 'idx_variants_item_active', 'menu_item_id, is_active, sort_order');
+    ensure_index('menu_item_options', 'idx_options_group_active', 'group_id, is_active');
+    ensure_index('coupons', 'idx_coupons_active_code_dates', 'code, is_active, starts_at, expires_at');
+    ensure_index('coupon_redemptions', 'idx_coupon_redemptions_coupon_user', 'coupon_id, user_id');
+    ensure_index('coupon_redemptions', 'idx_coupon_redemptions_order', 'order_id');
+    ensure_index('offers', 'idx_offers_active_scope_dates', 'is_active, scope, scope_id, starts_at, expires_at');
+    ensure_index('delivery_slabs', 'idx_delivery_slabs_active_range', 'is_active, min_km, max_km');
+    ensure_index('orders', 'idx_orders_user_created', 'user_id, created_at');
+    ensure_index('orders', 'idx_orders_status_created', 'status, created_at');
+    ensure_index('orders', 'idx_orders_payment_status', 'payment_status');
+    ensure_index('orders', 'idx_orders_delivery_boy_status', 'delivery_boy_id, status');
+    ensure_index('order_items', 'idx_order_items_order', 'order_id, id');
+    ensure_index('payments', 'idx_payments_order_status', 'order_id, status');
+    ensure_index('notifications', 'idx_notifications_status_created', 'status, created_at');
+    ensure_index('push_subscriptions', 'idx_push_subscriptions_user', 'user_id');
+    ensure_index('order_status_history', 'idx_order_status_history_order_created', 'order_id, created_at');
     $pdo->exec("CREATE TABLE IF NOT EXISTS delivery_locations (
         id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         order_id BIGINT UNSIGNED NOT NULL UNIQUE,
@@ -205,8 +242,72 @@ function ensure_order_management_schema(): void {
         UNIQUE KEY uniq_order_email_type (order_id, email_type),
         FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS promotional_banners (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        title VARCHAR(160) NOT NULL,
+        subtitle TEXT NULL,
+        image_url VARCHAR(500) NOT NULL,
+        button_text VARCHAR(80) NULL,
+        destination_type ENUM('none','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
+        destination_value VARCHAR(500) NULL,
+        display_order INT NOT NULL DEFAULT 0,
+        start_at DATETIME NULL,
+        end_at DATETIME NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_promotional_banners_active (is_active, display_order),
+        INDEX idx_promotional_banners_dates (start_at, end_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS promotional_marquee (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        message TEXT NOT NULL,
+        link VARCHAR(500) NULL,
+        display_order INT NOT NULL DEFAULT 0,
+        start_at DATETIME NULL,
+        end_at DATETIME NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_promotional_marquee_active (is_active, display_order),
+        INDEX idx_promotional_marquee_dates (start_at, end_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS promotional_popups (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        title VARCHAR(160) NOT NULL,
+        description TEXT NULL,
+        image_url VARCHAR(500) NULL,
+        offer_text VARCHAR(160) NULL,
+        button_text VARCHAR(80) NULL,
+        destination_type ENUM('none','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
+        destination_value VARCHAR(500) NULL,
+        display_frequency ENUM('session','daily','every_visit') NOT NULL DEFAULT 'session',
+        display_order INT NOT NULL DEFAULT 0,
+        start_at DATETIME NULL,
+        end_at DATETIME NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_promotional_popups_active (is_active, display_order),
+        INDEX idx_promotional_popups_dates (start_at, end_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     $pdo->prepare('INSERT IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?)')->execute(['customer_login_required', '0']);
     $done = true;
+}
+
+function ensure_index(string $table, string $index, string $columns): void {
+    static $checked = [];
+    $key = $table . '.' . $index;
+    if (isset($checked[$key])) {
+        return;
+    }
+    $dbName = env('DB_NAME', 'pizza_house');
+    $stmt = db()->prepare('SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND INDEX_NAME=?');
+    $stmt->execute([$dbName, $table, $index]);
+    if ((int)$stmt->fetchColumn() === 0) {
+        db()->exec("CREATE INDEX $index ON $table ($columns)");
+    }
+    $checked[$key] = true;
 }
 
 function order_statuses(): array {
@@ -359,6 +460,24 @@ function json_response(array $payload, int $status = 200): void {
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode($payload, JSON_UNESCAPED_SLASHES);
     exit;
+}
+
+function pagination_params(int $default = 50, int $max = 200): array {
+    $page = max(1, (int)($_GET['page'] ?? 1));
+    $perPage = max(1, min($max, (int)($_GET['per_page'] ?? $_GET['limit'] ?? $default)));
+    return ['page' => $page, 'per_page' => $perPage, 'limit' => $perPage, 'offset' => ($page - 1) * $perPage];
+}
+
+function paginated_query(string $sql, array $params, array $pagination): PDOStatement {
+    $stmt = db()->prepare($sql);
+    $position = 1;
+    foreach ($params as $value) {
+        $stmt->bindValue($position++, $value);
+    }
+    $stmt->bindValue($position++, (int)$pagination['limit'], PDO::PARAM_INT);
+    $stmt->bindValue($position, (int)$pagination['offset'], PDO::PARAM_INT);
+    $stmt->execute();
+    return $stmt;
 }
 
 function input(): array {
@@ -525,24 +644,24 @@ function public_upload_path(string $relativePath): string {
     return $target;
 }
 
-function uploaded_product_image_path(array $file, string $baseName = 'product'): string {
+function uploaded_image_path(array $file, string $baseName, string $directory, string $label): string {
     if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
         $errors = [
             UPLOAD_ERR_INI_SIZE => 'Uploaded image exceeds the server upload limit',
             UPLOAD_ERR_FORM_SIZE => 'Uploaded image exceeds the form upload limit',
             UPLOAD_ERR_PARTIAL => 'Image upload was incomplete',
-            UPLOAD_ERR_NO_FILE => 'Product image is required',
+            UPLOAD_ERR_NO_FILE => "$label image is required",
         ];
         json_response(['error' => $errors[$file['error']] ?? 'Image upload failed'], 422);
     }
     if ((int)($file['size'] ?? 0) <= 0 || (int)$file['size'] > 5 * 1024 * 1024) {
-        json_response(['error' => 'Product image must be 5MB or smaller'], 422);
+        json_response(['error' => "$label image must be 5MB or smaller"], 422);
     }
     $original = (string)($file['name'] ?? '');
     $extension = strtolower(pathinfo($original, PATHINFO_EXTENSION));
     $allowedExtensions = ['jpg' => 'jpg', 'jpeg' => 'jpg', 'png' => 'png', 'webp' => 'webp'];
     if (!isset($allowedExtensions[$extension])) {
-        json_response(['error' => 'Only JPG, PNG or WEBP product images are allowed'], 422);
+        json_response(['error' => 'Only JPG, PNG or WEBP images are allowed'], 422);
     }
     $tmp = (string)($file['tmp_name'] ?? '');
     if ($tmp === '' || !is_uploaded_file($tmp)) {
@@ -559,7 +678,11 @@ function uploaded_product_image_path(array $file, string $baseName = 'product'):
     }
     $safeBase = slugify($baseName);
     $filename = $safeBase . '-' . bin2hex(random_bytes(8)) . '.' . $allowedMimes[$mime];
-    $relative = 'uploads/products/' . $filename;
+    $directory = trim(str_replace(['\\', "\0"], ['/', ''], $directory), '/');
+    if (!in_array($directory, ['uploads/products', 'uploads/promotions', 'uploads/categories'], true)) {
+        throw new RuntimeException('Invalid upload directory');
+    }
+    $relative = $directory . '/' . $filename;
     $target = public_upload_path($relative);
     if (!move_uploaded_file($tmp, $target)) {
         json_response(['error' => 'Unable to save uploaded image'], 500);
@@ -568,12 +691,24 @@ function uploaded_product_image_path(array $file, string $baseName = 'product'):
     return $relative;
 }
 
+function uploaded_product_image_path(array $file, string $baseName = 'product'): string {
+    return uploaded_image_path($file, $baseName, 'uploads/products', 'Product');
+}
+
+function uploaded_promotion_image_path(array $file, string $baseName = 'promotion'): string {
+    return uploaded_image_path($file, $baseName, 'uploads/promotions', 'Promotion');
+}
+
+function uploaded_category_image_path(array $file, string $baseName = 'category'): string {
+    return uploaded_image_path($file, $baseName, 'uploads/categories', 'Category');
+}
+
 function delete_local_upload(?string $relativePath): void {
     if (!$relativePath) {
         return;
     }
     $relativePath = ltrim(str_replace(['\\', "\0"], ['/', ''], $relativePath), '/');
-    if (!str_starts_with($relativePath, 'uploads/products/')) {
+    if (!str_starts_with($relativePath, 'uploads/products/') && !str_starts_with($relativePath, 'uploads/promotions/') && !str_starts_with($relativePath, 'uploads/categories/')) {
         return;
     }
     $root = realpath(__DIR__);
@@ -582,7 +717,10 @@ function delete_local_upload(?string $relativePath): void {
     }
     $target = $root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath);
     $resolved = realpath($target);
-    if ($resolved && str_starts_with($resolved, $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'products' . DIRECTORY_SEPARATOR) && is_file($resolved)) {
+    $products = $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'products' . DIRECTORY_SEPARATOR;
+    $promotions = $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'promotions' . DIRECTORY_SEPARATOR;
+    $categories = $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'categories' . DIRECTORY_SEPARATOR;
+    if ($resolved && (str_starts_with($resolved, $products) || str_starts_with($resolved, $promotions) || str_starts_with($resolved, $categories)) && is_file($resolved)) {
         @unlink($resolved);
     }
 }
@@ -642,6 +780,32 @@ function active_coupon(?string $code, float $subtotal, ?int $userId): array {
         $discount = min($discount, (float)$coupon['max_discount']);
     }
     return ['coupon' => $coupon, 'discount' => money(min($discount, $subtotal))];
+}
+
+function enforce_coupon_limit_locked(?array $coupon, ?int $userId): void {
+    if (!$coupon) {
+        return;
+    }
+    $stmt = db()->prepare("SELECT * FROM coupons WHERE id=? AND is_active=1 AND (starts_at IS NULL OR starts_at <= NOW()) AND (expires_at IS NULL OR expires_at >= NOW()) LIMIT 1 FOR UPDATE");
+    $stmt->execute([$coupon['id']]);
+    $lockedCoupon = $stmt->fetch();
+    if (!$lockedCoupon) {
+        throw new ApiException('Invalid coupon', 422);
+    }
+    if ($lockedCoupon['overall_usage_limit'] !== null) {
+        $count = db()->prepare('SELECT COUNT(*) FROM coupon_redemptions WHERE coupon_id=?');
+        $count->execute([$lockedCoupon['id']]);
+        if ((int)$count->fetchColumn() >= (int)$lockedCoupon['overall_usage_limit']) {
+            throw new ApiException('Coupon usage limit reached', 422);
+        }
+    }
+    if ($lockedCoupon['per_customer_limit'] !== null && $userId !== null) {
+        $count = db()->prepare('SELECT COUNT(*) FROM coupon_redemptions WHERE coupon_id=? AND user_id=?');
+        $count->execute([$lockedCoupon['id'], $userId]);
+        if ((int)$count->fetchColumn() >= (int)$lockedCoupon['per_customer_limit']) {
+            throw new ApiException('Coupon customer usage limit reached', 422);
+        }
+    }
 }
 
 function bogo_free_qty(array $item, int $qty): int {
@@ -1105,6 +1269,46 @@ function validate_admin_resource(string $name, array $payload): void {
         if (isset($payload['min_km'], $payload['max_km']) && (float)$payload['min_km'] > (float)$payload['max_km']) json_response(['error' => 'Delivery slab min_km cannot exceed max_km'], 422);
         if (isset($payload['charge']) && (float)$payload['charge'] < 0) json_response(['error' => 'Delivery charge cannot be negative'], 422);
     }
+    if (in_array($name, ['promotional-banners', 'promotional-popups'], true)) {
+        if (isset($payload['destination_type']) && !in_array($payload['destination_type'], ['none','product','category','offer','custom_url'], true)) {
+            json_response(['error' => 'Invalid destination type'], 422);
+        }
+        if (($payload['destination_type'] ?? 'none') === 'custom_url' && !empty($payload['destination_value']) && !filter_var($payload['destination_value'], FILTER_VALIDATE_URL)) {
+            json_response(['error' => 'Custom destination must be a valid URL'], 422);
+        }
+        if (isset($payload['image_url']) && $payload['image_url'] !== '' && !preg_match('#^(uploads/promotions/|https?://)#i', (string)$payload['image_url'])) {
+            json_response(['error' => 'Invalid promotion image path'], 422);
+        }
+    }
+    if ($name === 'categories' && isset($payload['image_url']) && $payload['image_url'] !== '' && !preg_match('#^(uploads/categories/|https?://)#i', (string)$payload['image_url'])) {
+        json_response(['error' => 'Invalid category image path'], 422);
+    }
+    if ($name === 'promotional-popups' && isset($payload['display_frequency']) && !in_array($payload['display_frequency'], ['session','daily','every_visit'], true)) {
+        json_response(['error' => 'Invalid popup frequency'], 422);
+    }
+    if ($name === 'promotional-marquee' && !empty($payload['link']) && !filter_var($payload['link'], FILTER_VALIDATE_URL) && !str_starts_with((string)$payload['link'], '#') && !str_starts_with((string)$payload['link'], '/')) {
+        json_response(['error' => 'Invalid marquee link'], 422);
+    }
+    if (in_array($name, ['promotional-banners', 'promotional-marquee', 'promotional-popups'], true)) {
+        if (isset($payload['display_order']) && !is_numeric($payload['display_order'])) json_response(['error' => 'Display order must be numeric'], 422);
+        foreach (['start_at', 'end_at'] as $field) {
+            if (!empty($payload[$field]) && strtotime((string)$payload[$field]) === false) json_response(['error' => "$field must be a valid date/time"], 422);
+        }
+    }
+}
+
+function normalize_admin_payload(array $payload): array {
+    foreach ($payload as $key => $value) {
+        if (str_ends_with($key, '_at')) {
+            $payload[$key] = trim((string)$value) === '' ? null : str_replace('T', ' ', (string)$value);
+        }
+    }
+    foreach (['display_order','is_active','stock','low_stock_threshold','overall_usage_limit','per_customer_limit','buy_qty','get_qty','scope_id','category_id'] as $key) {
+        if (array_key_exists($key, $payload) && $payload[$key] !== '' && $payload[$key] !== null) {
+            $payload[$key] = (int)$payload[$key];
+        }
+    }
+    return $payload;
 }
 
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
@@ -1121,7 +1325,7 @@ if ($path === '/health/db') {
     }
 }
 
-if (str_starts_with($path, '/orders') || str_starts_with($path, '/account/orders') || str_starts_with($path, '/admin') || str_starts_with($path, '/delivery') || str_starts_with($path, '/auth') || str_starts_with($path, '/cart') || str_starts_with($path, '/payments') || $path === '/settings') {
+if (str_starts_with($path, '/orders') || str_starts_with($path, '/account/orders') || str_starts_with($path, '/admin') || str_starts_with($path, '/delivery') || str_starts_with($path, '/auth') || str_starts_with($path, '/cart') || str_starts_with($path, '/payments') || $path === '/settings' || $path === '/promotions') {
     ensure_order_management_schema();
 }
 if ($path === '/theme' && $method === 'GET') json_response(['theme' => theme()]);
@@ -1129,6 +1333,13 @@ if ($path === '/settings' && $method === 'GET') {
     $s = settings();
     unset($s['RAZORPAY_KEY_SECRET']);
     json_response(['settings' => $s, 'razorpay_key_id' => env('RAZORPAY_KEY_ID', '')]);
+}
+if ($path === '/promotions' && $method === 'GET') {
+    $activeWindow = "is_active=1 AND (start_at IS NULL OR start_at <= NOW()) AND (end_at IS NULL OR end_at >= NOW())";
+    $banners = db()->query("SELECT * FROM promotional_banners WHERE $activeWindow ORDER BY display_order, id")->fetchAll();
+    $marquee = db()->query("SELECT * FROM promotional_marquee WHERE $activeWindow ORDER BY display_order, id")->fetchAll();
+    $popup = db()->query("SELECT * FROM promotional_popups WHERE $activeWindow ORDER BY display_order, id LIMIT 1")->fetch() ?: null;
+    json_response(['banners' => $banners, 'marquee' => $marquee, 'popup' => $popup]);
 }
 
 if ($path === '/auth/register' && $method === 'POST') {
@@ -1203,11 +1414,11 @@ if ($path === '/auth/admin-logout' && $method === 'POST') {
 }
 
 if ($path === '/menu' && $method === 'GET') {
-    $categories = db()->query('SELECT * FROM categories WHERE is_active=1 ORDER BY sort_order, name')->fetchAll();
-    $items = db()->query('SELECT * FROM menu_items WHERE is_active=1 ORDER BY name')->fetchAll();
+    $categories = db()->query('SELECT id, name, slug, description, image_url, sort_order, is_active FROM categories WHERE is_active=1 ORDER BY sort_order, name')->fetchAll();
+    $items = db()->query('SELECT id, category_id, name, slug, description, price, stock, low_stock_threshold, image_url, is_active FROM menu_items WHERE is_active=1 ORDER BY name')->fetchAll();
     $variants = [];
     try {
-        foreach (db()->query('SELECT * FROM menu_item_variants WHERE is_active=1 ORDER BY menu_item_id, sort_order, id')->fetchAll() as $variant) {
+        foreach (db()->query('SELECT id, menu_item_id, name, price, sort_order, is_default, is_active FROM menu_item_variants WHERE is_active=1 ORDER BY menu_item_id, sort_order, id')->fetchAll() as $variant) {
             $variants[(int)$variant['menu_item_id']][] = $variant;
         }
     } catch (Throwable $e) {
@@ -1219,9 +1430,9 @@ if ($path === '/menu' && $method === 'GET') {
     }, $items);
     $optionGroups = [];
     try {
-        $groups = db()->query('SELECT * FROM menu_option_groups WHERE is_active=1 ORDER BY sort_order, name')->fetchAll();
+        $groups = db()->query('SELECT id, name, slug, sort_order, is_active FROM menu_option_groups WHERE is_active=1 ORDER BY sort_order, name')->fetchAll();
         $optionsByGroup = [];
-        foreach (db()->query('SELECT * FROM menu_item_options WHERE is_active=1 ORDER BY group_id, name')->fetchAll() as $option) {
+        foreach (db()->query('SELECT id, group_id, name, slug, small_price, medium_price, large_price, fixed_price, applies_to, is_active FROM menu_item_options WHERE is_active=1 ORDER BY group_id, name')->fetchAll() as $option) {
             $optionsByGroup[(int)$option['group_id']][] = $option;
         }
         foreach ($groups as $group) {
@@ -1308,6 +1519,7 @@ if ($path === '/orders' && $method === 'POST') {
     ensure_online_payment_configured($payable['pay_now']);
     $pdo->beginTransaction();
     try {
+        enforce_coupon_limit_locked($calc['coupon'], $user ? (int)$user['id'] : null);
         $orderNumber = 'TPH-' . date('Ymd') . '-' . strtoupper(bin2hex(random_bytes(3)));
         $stmt = $pdo->prepare('INSERT INTO orders (order_number, user_id, guest_name, guest_phone, guest_email, order_type, subtotal, discount_amount, delivery_charge, total_amount, coupon_id, delivery_address, latitude, longitude, distance_km, payment_mode, payment_status, paid_amount, remaining_amount, idempotency_key, guest_access_token_hash, guest_access_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY))');
         $stmt->execute([$orderNumber, $user['id'] ?? null, $guest['name'] ?? null, $guest['phone'] ?? null, $guest['email'] ?? null, $orderType, $calc['subtotal'], $calc['discount'], $calc['delivery']['delivery_charge'], $calc['total'], $calc['coupon']['id'] ?? null, $deliveryAddress, $lat, $lng, $calc['delivery']['distance_km'], $data['payment_mode'], $payable['status'], $payable['remaining'], $idempotency, $guestAccessToken ? hash('sha256', $guestAccessToken) : null]);
@@ -1321,7 +1533,7 @@ if ($path === '/orders' && $method === 'POST') {
             $stockStmt = $pdo->prepare('UPDATE menu_items SET stock = stock - ? WHERE id=? AND stock >= ?');
             $stockStmt->execute([$line['quantity'] + $line['free_quantity'], $item['id'], $line['quantity'] + $line['free_quantity']]);
             if ($stockStmt->rowCount() !== 1) {
-                throw new RuntimeException($item['name'] . ' stock changed while ordering. Please retry.');
+                throw new ApiException($item['name'] . ' stock changed while ordering. Please retry.', 409);
             }
         }
         if ($calc['coupon']) {
@@ -1334,6 +1546,19 @@ if ($path === '/orders' && $method === 'POST') {
             $pdo->prepare('INSERT INTO payments (order_id, razorpay_order_id, amount, status) VALUES (?, ?, ?, ?)')->execute([$orderId, $razorpayOrder['id'], $payable['pay_now'], 'created']);
         }
         $pdo->commit();
+    } catch (ApiException $e) {
+        $pdo->rollBack();
+        json_response(['error' => $e->getMessage()], $e->status);
+    } catch (PDOException $e) {
+        $pdo->rollBack();
+        if (($e->errorInfo[0] ?? '') === '23000') {
+            $duplicate = $pdo->prepare('SELECT * FROM orders WHERE idempotency_key=? LIMIT 1');
+            $duplicate->execute([$idempotency]);
+            if ($row = $duplicate->fetch()) {
+                json_response(['order' => public_order($row), 'duplicate' => true]);
+            }
+        }
+        throw $e;
     } catch (Throwable $e) {
         $pdo->rollBack();
         throw $e;
@@ -1369,25 +1594,61 @@ if ($path === '/payments/verify' && $method === 'POST') {
     } else {
         json_response(['error' => 'Razorpay secret is not configured'], 500);
     }
-    $payment = db()->prepare('SELECT * FROM payments WHERE order_id=? AND razorpay_order_id=? LIMIT 1');
-    $payment->execute([$order['id'], $data['razorpay_order_id']]);
-    $paymentRow = $payment->fetch();
-    if (!$paymentRow) json_response(['error' => 'Payment record not found'], 422);
+    $paymentLookup = db()->prepare('SELECT id, amount FROM payments WHERE order_id=? AND razorpay_order_id=? LIMIT 1');
+    $paymentLookup->execute([$order['id'], $data['razorpay_order_id']]);
+    $paymentPreview = $paymentLookup->fetch();
+    if (!$paymentPreview) json_response(['error' => 'Payment record not found'], 422);
     $remotePayment = razorpay_fetch_payment((string)$data['razorpay_payment_id']);
     if ($remotePayment) {
-        $expectedPaise = (int)round((float)$paymentRow['amount'] * 100);
+        $expectedPaise = (int)round((float)$paymentPreview['amount'] * 100);
         if (($remotePayment['order_id'] ?? '') !== $data['razorpay_order_id']) json_response(['error' => 'Razorpay order mismatch'], 422);
         if ((int)($remotePayment['amount'] ?? 0) !== $expectedPaise) json_response(['error' => 'Razorpay amount mismatch'], 422);
         if (!in_array(($remotePayment['status'] ?? ''), ['captured', 'authorized'], true)) json_response(['error' => 'Razorpay payment is not successful'], 422);
     }
-    $paidAmount = (float)$paymentRow['amount'];
-    $status = $paidAmount >= (float)$order['total_amount'] ? 'Paid' : 'Partially Paid';
-    $remaining = money((float)$order['total_amount'] - $paidAmount);
-    db()->prepare('UPDATE payments SET razorpay_payment_id=?, status=?, raw_payload=? WHERE id=?')->execute([$data['razorpay_payment_id'], 'verified', json_encode($data), $paymentRow['id']]);
-    db()->prepare('UPDATE orders SET razorpay_payment_id=?, paid_amount=?, remaining_amount=?, payment_status=? WHERE id=?')->execute([$data['razorpay_payment_id'], $paidAmount, $remaining, $status, $order['id']]);
-    $stmt = db()->prepare('SELECT * FROM orders WHERE id=?');
-    $stmt->execute([$order['id']]);
-    $updatedOrder = $stmt->fetch();
+    $pdo = db();
+    $pdo->beginTransaction();
+    try {
+        $lockedOrder = $pdo->prepare('SELECT * FROM orders WHERE id=? FOR UPDATE');
+        $lockedOrder->execute([$order['id']]);
+        $order = $lockedOrder->fetch();
+        if (!$order) {
+            throw new RuntimeException('Order not found during payment verification');
+        }
+        if ($order['razorpay_payment_id']) {
+            $pdo->commit();
+            json_response(['order' => public_order($order), 'duplicate' => true]);
+        }
+        $payment = $pdo->prepare('SELECT * FROM payments WHERE order_id=? AND razorpay_order_id=? LIMIT 1 FOR UPDATE');
+        $payment->execute([$order['id'], $data['razorpay_order_id']]);
+        $paymentRow = $payment->fetch();
+        if (!$paymentRow) {
+            $pdo->rollBack();
+            json_response(['error' => 'Payment record not found'], 422);
+        }
+        $paidAmount = (float)$paymentRow['amount'];
+        $status = $paidAmount >= (float)$order['total_amount'] ? 'Paid' : 'Partially Paid';
+        $remaining = money((float)$order['total_amount'] - $paidAmount);
+        $pdo->prepare('UPDATE payments SET razorpay_payment_id=?, status=?, raw_payload=? WHERE id=?')->execute([$data['razorpay_payment_id'], 'verified', json_encode($data), $paymentRow['id']]);
+        $pdo->prepare('UPDATE orders SET razorpay_payment_id=?, paid_amount=?, remaining_amount=?, payment_status=? WHERE id=?')->execute([$data['razorpay_payment_id'], $paidAmount, $remaining, $status, $order['id']]);
+        $stmt = $pdo->prepare('SELECT * FROM orders WHERE id=?');
+        $stmt->execute([$order['id']]);
+        $updatedOrder = $stmt->fetch();
+        $pdo->commit();
+    } catch (PDOException $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        if (($e->errorInfo[0] ?? '') === '23000') {
+            $stmt = db()->prepare('SELECT * FROM orders WHERE id=? LIMIT 1');
+            $stmt->execute([$order['id']]);
+            $duplicateOrder = $stmt->fetch();
+            if ($duplicateOrder && $duplicateOrder['razorpay_payment_id'] === $data['razorpay_payment_id']) {
+                json_response(['order' => public_order($duplicateOrder), 'duplicate' => true]);
+            }
+        }
+        throw $e;
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        throw $e;
+    }
     queue_invoice_email_after_order((int)$order['id']);
     json_response(['order' => public_order($updatedOrder)]);
 }
@@ -1424,9 +1685,9 @@ if (preg_match('#^/orders/(\d+)/driver-location$#', $path, $m) && $method === 'G
 
 if ($path === '/account/orders' && $method === 'GET') {
     $user = current_user(true, 'customer');
-    $stmt = db()->prepare('SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC');
-    $stmt->execute([$user['id']]);
-    json_response(['orders' => $stmt->fetchAll()]);
+        $pagination = pagination_params();
+        $stmt = paginated_query('SELECT id, order_number, order_type, status, subtotal, discount_amount, delivery_charge, total_amount, payment_mode, payment_status, paid_amount, remaining_amount, created_at, updated_at FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?', [$user['id']], $pagination);
+        json_response(['orders' => $stmt->fetchAll(), 'pagination' => $pagination]);
 }
 
 if ($path === '/account/addresses') {
@@ -1457,6 +1718,7 @@ if ($path === '/notifications/subscribe' && $method === 'POST') {
 if (str_starts_with($path, '/delivery')) {
     $deliveryBoy = current_user(true, 'delivery_boy');
     if ($path === '/delivery/orders' && $method === 'GET') {
+        $pagination = pagination_params(50, 200);
         $sql = "SELECT o.*, COALESCE(u.name, o.guest_name, 'Guest Customer') AS customer_name, COALESCE(u.phone, o.guest_phone, '') AS customer_phone,
             COALESCE(items.items_summary, '') AS items_summary,
             dl.latitude AS driver_latitude, dl.longitude AS driver_longitude, dl.accuracy AS driver_accuracy, dl.recorded_at AS driver_recorded_at
@@ -1469,10 +1731,10 @@ if (str_starts_with($path, '/delivery')) {
             ) items ON items.order_id=o.id
             LEFT JOIN delivery_locations dl ON dl.order_id=o.id
             WHERE o.delivery_boy_id=? AND o.order_type='delivery' AND o.status NOT IN ('delivered','cancelled')
-            ORDER BY o.created_at DESC";
-        $stmt = db()->prepare($sql);
-        $stmt->execute([$deliveryBoy['id']]);
-        json_response(['orders' => $stmt->fetchAll()]);
+            ORDER BY o.created_at DESC
+            LIMIT ? OFFSET ?";
+        $stmt = paginated_query($sql, [$deliveryBoy['id']], $pagination);
+        json_response(['orders' => $stmt->fetchAll(), 'pagination' => $pagination]);
     }
     if (preg_match('#^/delivery/orders/(\d+)/start$#', $path, $m) && $method === 'POST') {
         $stmt = db()->prepare("SELECT * FROM orders WHERE id=? AND delivery_boy_id=? AND order_type='delivery' LIMIT 1");
@@ -1481,7 +1743,11 @@ if (str_starts_with($path, '/delivery')) {
         if (!$order) json_response(['error' => 'Assigned delivery order not found'], 404);
         if (!in_array($order['status'], ['ready','picked_up'], true)) json_response(['error' => 'Order is not ready for delivery'], 422);
         $previous = $order['status'];
-        db()->prepare("UPDATE orders SET status='out_for_delivery', delivery_started_at=COALESCE(delivery_started_at, NOW()) WHERE id=?")->execute([$order['id']]);
+        $update = db()->prepare("UPDATE orders SET status='out_for_delivery', delivery_started_at=COALESCE(delivery_started_at, NOW()) WHERE id=? AND status=?");
+        $update->execute([$order['id'], $previous]);
+        if ($update->rowCount() !== 1) {
+            json_response(['error' => 'Order status changed. Please refresh and retry.'], 409);
+        }
         db()->prepare('INSERT INTO order_status_history (order_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)')->execute([$order['id'], $previous, 'out_for_delivery', $deliveryBoy['id']]);
         queue_order_notifications((int)$order['id'], 'Order ' . $order['order_number'] . ' is out for delivery.');
         json_response(['ok' => true]);
@@ -1504,7 +1770,11 @@ if (str_starts_with($path, '/delivery')) {
         $stmt->execute([(int)$m[1], $deliveryBoy['id']]);
         $order = $stmt->fetch();
         if (!$order) json_response(['error' => 'Active delivery order not found'], 404);
-        db()->prepare("UPDATE orders SET status='delivered', delivered_at=NOW() WHERE id=?")->execute([$order['id']]);
+        $update = db()->prepare("UPDATE orders SET status='delivered', delivered_at=NOW() WHERE id=? AND status='out_for_delivery'");
+        $update->execute([$order['id']]);
+        if ($update->rowCount() !== 1) {
+            json_response(['error' => 'Order status changed. Please refresh and retry.'], 409);
+        }
         db()->prepare('INSERT INTO order_status_history (order_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)')->execute([$order['id'], 'out_for_delivery', 'delivered', $deliveryBoy['id']]);
         queue_order_notifications((int)$order['id'], 'Order ' . $order['order_number'] . ' has been delivered.');
         json_response(['ok' => true]);
@@ -1525,8 +1795,9 @@ if (str_starts_with($path, '/admin')) {
         json_response(['stats' => $stats]);
     }
     if ($path === '/admin/delivery-boys' && $method === 'GET') {
-        $boys = db()->query("SELECT id, name, phone, email, role, is_active, created_at, updated_at FROM users WHERE role='delivery_boy' ORDER BY name")->fetchAll();
-        json_response(['delivery_boys' => $boys]);
+        $pagination = pagination_params();
+        $stmt = paginated_query("SELECT id, name, phone, email, role, is_active, created_at, updated_at FROM users WHERE role='delivery_boy' ORDER BY name LIMIT ? OFFSET ?", [], $pagination);
+        json_response(['delivery_boys' => $stmt->fetchAll(), 'pagination' => $pagination]);
     }
     if ($path === '/admin/delivery-boys' && $method === 'POST') {
         require_fields($data, ['name', 'phone', 'email', 'password']);
@@ -1573,22 +1844,43 @@ if (str_starts_with($path, '/admin')) {
         $imagePath = uploaded_product_image_path($_FILES['image'], (string)($_POST['name'] ?? 'product'));
         json_response(['image_url' => $imagePath, 'url' => rtrim(env('APP_URL', ''), '/') . '/' . $imagePath], 201);
     }
+    if ($path === '/admin/promotion-image' && $method === 'POST') {
+        if (empty($_FILES['image']) || !is_array($_FILES['image'])) {
+            json_response(['error' => 'Promotion image is required'], 422);
+        }
+        $imagePath = uploaded_promotion_image_path($_FILES['image'], (string)($_POST['name'] ?? 'promotion'));
+        json_response(['image_url' => $imagePath, 'url' => rtrim(env('APP_URL', ''), '/') . '/' . $imagePath], 201);
+    }
+    if ($path === '/admin/category-image' && $method === 'POST') {
+        if (empty($_FILES['image']) || !is_array($_FILES['image'])) {
+            json_response(['error' => 'Category image is required'], 422);
+        }
+        $imagePath = uploaded_category_image_path($_FILES['image'], (string)($_POST['name'] ?? 'category'));
+        json_response(['image_url' => $imagePath, 'url' => rtrim(env('APP_URL', ''), '/') . '/' . $imagePath], 201);
+    }
     $resources = [
-        'categories' => ['table' => 'categories', 'fields' => ['name','slug','description','sort_order','is_active']],
+        'categories' => ['table' => 'categories', 'fields' => ['name','slug','description','image_url','sort_order','is_active']],
         'products' => ['table' => 'menu_items', 'fields' => ['category_id','name','slug','description','price','stock','low_stock_threshold','image_url','is_active']],
         'coupons' => ['table' => 'coupons', 'fields' => ['code','discount_type','discount_value','min_order_value','max_discount','starts_at','expires_at','overall_usage_limit','per_customer_limit','is_active']],
         'offers' => ['table' => 'offers', 'fields' => ['name','scope','scope_id','buy_qty','get_qty','starts_at','expires_at','is_active']],
         'delivery-slabs' => ['table' => 'delivery_slabs', 'fields' => ['min_km','max_km','charge','is_active']],
+        'promotional-banners' => ['table' => 'promotional_banners', 'fields' => ['title','subtitle','image_url','button_text','destination_type','destination_value','display_order','start_at','end_at','is_active']],
+        'promotional-marquee' => ['table' => 'promotional_marquee', 'fields' => ['message','link','display_order','start_at','end_at','is_active']],
+        'promotional-popups' => ['table' => 'promotional_popups', 'fields' => ['title','description','image_url','offer_text','button_text','destination_type','destination_value','display_frequency','display_order','start_at','end_at','is_active']],
     ];
     foreach ($resources as $name => $meta) {
         if ($path === '/admin/' . $name && $method === 'GET') {
-            json_response(['items' => db()->query('SELECT * FROM ' . $meta['table'] . ' ORDER BY id DESC')->fetchAll()]);
+            $pagination = pagination_params();
+            $stmt = paginated_query('SELECT * FROM ' . $meta['table'] . ' ORDER BY id DESC LIMIT ? OFFSET ?', [], $pagination);
+            json_response(['items' => $stmt->fetchAll(), 'pagination' => $pagination]);
         }
         if ($path === '/admin/' . $name && $method === 'POST') {
             $payload = array_intersect_key($data, array_flip($meta['fields']));
             if (isset($payload['name']) && empty($payload['slug']) && in_array('slug', $meta['fields'], true)) $payload['slug'] = slugify($payload['name']);
             if (isset($payload['code'])) $payload['code'] = strtoupper($payload['code']);
+            $payload = normalize_admin_payload($payload);
             if (!$payload) json_response(['error' => 'No valid fields supplied'], 422);
+            if ($name === 'promotional-banners' && empty($payload['image_url'])) json_response(['error' => 'Banner image is required'], 422);
             validate_admin_resource($name, $payload);
             $cols = array_keys($payload);
             $sql = 'INSERT INTO ' . $meta['table'] . ' (' . implode(',', $cols) . ') VALUES (' . implode(',', array_fill(0, count($cols), '?')) . ')';
@@ -1600,30 +1892,31 @@ if (str_starts_with($path, '/admin')) {
                 $payload = array_intersect_key($data, array_flip($meta['fields']));
                 if (isset($payload['name']) && empty($payload['slug']) && in_array('slug', $meta['fields'], true)) $payload['slug'] = slugify($payload['name']);
                 if (isset($payload['code'])) $payload['code'] = strtoupper($payload['code']);
+                $payload = normalize_admin_payload($payload);
                 if (!$payload) json_response(['error' => 'No valid fields supplied'], 422);
                 validate_admin_resource($name, $payload);
                 $previousImage = null;
-                if ($name === 'products' && array_key_exists('image_url', $payload)) {
-                    $previousStmt = db()->prepare('SELECT image_url FROM menu_items WHERE id=? LIMIT 1');
+                if (in_array($name, ['products', 'categories', 'promotional-banners', 'promotional-popups'], true) && array_key_exists('image_url', $payload)) {
+                    $previousStmt = db()->prepare('SELECT image_url FROM ' . $meta['table'] . ' WHERE id=? LIMIT 1');
                     $previousStmt->execute([(int)$m[1]]);
                     $previousImage = $previousStmt->fetchColumn() ?: null;
                 }
                 $sets = implode(',', array_map(fn($c) => "$c=?", array_keys($payload)));
                 db()->prepare('UPDATE ' . $meta['table'] . " SET $sets WHERE id=?")->execute([...array_values($payload), (int)$m[1]]);
-                if ($name === 'products' && array_key_exists('image_url', $payload) && $previousImage && $previousImage !== ($payload['image_url'] ?? '')) {
+                if (in_array($name, ['products', 'categories', 'promotional-banners', 'promotional-popups'], true) && array_key_exists('image_url', $payload) && $previousImage && $previousImage !== ($payload['image_url'] ?? '')) {
                     delete_local_upload($previousImage);
                 }
                 json_response(['ok' => true]);
             }
             if ($method === 'DELETE') {
                 $previousImage = null;
-                if ($name === 'products') {
-                    $previousStmt = db()->prepare('SELECT image_url FROM menu_items WHERE id=? LIMIT 1');
+                if (in_array($name, ['products', 'categories', 'promotional-banners', 'promotional-popups'], true)) {
+                    $previousStmt = db()->prepare('SELECT image_url FROM ' . $meta['table'] . ' WHERE id=? LIMIT 1');
                     $previousStmt->execute([(int)$m[1]]);
                     $previousImage = $previousStmt->fetchColumn() ?: null;
                 }
                 db()->prepare('DELETE FROM ' . $meta['table'] . ' WHERE id=?')->execute([(int)$m[1]]);
-                if ($name === 'products') {
+                if (in_array($name, ['products', 'categories', 'promotional-banners', 'promotional-popups'], true)) {
                     delete_local_upload($previousImage);
                 }
                 json_response(['ok' => true]);
@@ -1631,6 +1924,7 @@ if (str_starts_with($path, '/admin')) {
         }
     }
     if ($path === '/admin/orders' && $method === 'GET') {
+        $pagination = pagination_params(50, 200);
         $sql = "SELECT o.*, COALESCE(u.name, o.guest_name, 'Guest Customer') AS customer_name, COALESCE(u.phone, o.guest_phone, '') AS customer_phone, dboy.name AS delivery_boy_name, dboy.phone AS delivery_boy_phone,
             COALESCE(items.items_summary, '') AS items_summary, COALESCE(items.items_count, 0) AS items_count,
             dl.latitude AS driver_latitude, dl.longitude AS driver_longitude, dl.accuracy AS driver_accuracy, dl.recorded_at AS driver_recorded_at
@@ -1645,8 +1939,9 @@ if (str_starts_with($path, '/admin')) {
             ) items ON items.order_id=o.id
             LEFT JOIN delivery_locations dl ON dl.order_id=o.id
             ORDER BY o.created_at DESC
-            LIMIT 200";
-        json_response(['orders' => db()->query($sql)->fetchAll(), 'statuses' => order_statuses()]);
+            LIMIT ? OFFSET ?";
+        $stmt = paginated_query($sql, [], $pagination);
+        json_response(['orders' => $stmt->fetchAll(), 'statuses' => order_statuses(), 'pagination' => $pagination]);
     }
     if (preg_match('#^/admin/orders/(\d+)/tracking$#', $path, $m) && $method === 'GET') {
         $order = order_with_customer((int)$m[1]);
@@ -1664,8 +1959,10 @@ if (str_starts_with($path, '/admin')) {
         json_response(['email' => send_invoice_email($order, true)]);
     }
     if ($path === '/admin/payments' && $method === 'GET') {
-        $sql = 'SELECT p.id, p.order_id, o.order_number, p.razorpay_order_id, p.razorpay_payment_id, p.amount, p.status, p.method, p.created_at FROM payments p JOIN orders o ON o.id=p.order_id ORDER BY p.created_at DESC LIMIT 200';
-        json_response(['payments' => db()->query($sql)->fetchAll()]);
+        $pagination = pagination_params(50, 200);
+        $sql = 'SELECT p.id, p.order_id, o.order_number, p.razorpay_order_id, p.razorpay_payment_id, p.amount, p.status, p.method, p.created_at FROM payments p JOIN orders o ON o.id=p.order_id ORDER BY p.created_at DESC LIMIT ? OFFSET ?';
+        $stmt = paginated_query($sql, [], $pagination);
+        json_response(['payments' => $stmt->fetchAll(), 'pagination' => $pagination]);
     }
     if (preg_match('#^/admin/orders/(\d+)$#', $path, $m) && $method === 'PUT') {
         $stmt = db()->prepare('SELECT * FROM orders WHERE id=?');
@@ -1701,7 +1998,15 @@ if (str_starts_with($path, '/admin')) {
             $boy->execute([$deliveryBoyId]);
             if (!$boy->fetch()) json_response(['error' => 'Delivery boy not found'], 422);
         }
-        db()->prepare('UPDATE orders SET status=?, payment_status=?, delivery_boy_id=?, accepted_at=?, estimated_ready_at=?, preparation_minutes=? WHERE id=?')->execute([$status, $paymentStatus, $deliveryBoyId, $acceptedAt, $estimatedReadyAt, $preparationMinutes, $order['id']]);
+        if ($status !== $order['status']) {
+            $update = db()->prepare('UPDATE orders SET status=?, payment_status=?, delivery_boy_id=?, accepted_at=?, estimated_ready_at=?, preparation_minutes=? WHERE id=? AND status=?');
+            $update->execute([$status, $paymentStatus, $deliveryBoyId, $acceptedAt, $estimatedReadyAt, $preparationMinutes, $order['id'], $order['status']]);
+            if ($update->rowCount() !== 1) {
+                json_response(['error' => 'Order status changed. Please refresh and retry.'], 409);
+            }
+        } else {
+            db()->prepare('UPDATE orders SET status=?, payment_status=?, delivery_boy_id=?, accepted_at=?, estimated_ready_at=?, preparation_minutes=? WHERE id=?')->execute([$status, $paymentStatus, $deliveryBoyId, $acceptedAt, $estimatedReadyAt, $preparationMinutes, $order['id']]);
+        }
         if ($status !== $order['status']) {
             db()->prepare('INSERT INTO order_status_history (order_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)')->execute([$order['id'], $order['status'], $status, $admin['id']]);
             queue_order_notifications((int)$order['id'], 'Order ' . $order['order_number'] . ' status changed to ' . status_label($status));
@@ -1726,7 +2031,9 @@ if (str_starts_with($path, '/admin')) {
         }
     }
     if ($path === '/admin/notifications' && $method === 'GET') {
-        json_response(['notifications' => db()->query('SELECT * FROM notifications ORDER BY created_at DESC LIMIT 200')->fetchAll()]);
+        $pagination = pagination_params(50, 200);
+        $stmt = paginated_query('SELECT id, order_id, channel, recipient, message, status, provider_response, created_at FROM notifications ORDER BY created_at DESC LIMIT ? OFFSET ?', [], $pagination);
+        json_response(['notifications' => $stmt->fetchAll(), 'pagination' => $pagination]);
     }
 }
 

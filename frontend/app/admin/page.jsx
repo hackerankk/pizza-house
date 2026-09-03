@@ -3,15 +3,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import Script from 'next/script';
-import { Bell, Camera, Clock, CreditCard, Eye, FileText, LayoutDashboard, LogOut, Mail, Menu, Palette, Printer, RotateCcw, Save, Settings, ShoppingBag, Tag, Truck, Upload, Utensils, X } from 'lucide-react';
+import { Bell, Camera, Clock, CreditCard, Eye, FileText, Gift, LayoutDashboard, LogOut, Mail, Megaphone, Menu, Palette, Printer, RotateCcw, Save, Settings, ShoppingBag, Tag, Truck, Upload, Utensils, X } from 'lucide-react';
 import { adminApi, adminLogout, adminUploadApi, api, applyTheme, clearToken, downloadInvoice, inr, itemSelectionText, itemVariantText, openInvoice, productImage, refreshAdminSession, setToken, token } from '../lib';
 
 const resources = {
   products: ['category_id', 'name', 'slug', 'description', 'price', 'stock', 'low_stock_threshold', 'image_url', 'is_active'],
-  categories: ['name', 'slug', 'description', 'sort_order', 'is_active'],
+  categories: ['name', 'slug', 'description', 'image_url', 'sort_order', 'is_active'],
   coupons: ['code', 'discount_type', 'discount_value', 'min_order_value', 'max_discount', 'starts_at', 'expires_at', 'overall_usage_limit', 'per_customer_limit', 'is_active'],
   offers: ['name', 'scope', 'scope_id', 'buy_qty', 'get_qty', 'starts_at', 'expires_at', 'is_active'],
-  'delivery-slabs': ['min_km', 'max_km', 'charge', 'is_active']
+  'delivery-slabs': ['min_km', 'max_km', 'charge', 'is_active'],
+  'promotional-banners': ['title', 'subtitle', 'image_url', 'button_text', 'destination_type', 'destination_value', 'display_order', 'start_at', 'end_at', 'is_active'],
+  'promotional-marquee': ['message', 'link', 'display_order', 'start_at', 'end_at', 'is_active'],
+  'promotional-popups': ['title', 'description', 'image_url', 'offer_text', 'button_text', 'destination_type', 'destination_value', 'display_frequency', 'display_order', 'start_at', 'end_at', 'is_active']
 };
 
 const tabs = [
@@ -22,6 +25,9 @@ const tabs = [
   ['categories', 'Categories', Menu],
   ['coupons', 'Coupons', Tag],
   ['offers', 'Offers', Tag],
+  ['promotional-banners', 'Promotional Banners', Gift],
+  ['promotional-marquee', 'Promotional Marquee', Megaphone],
+  ['promotional-popups', 'Offer Popup', Gift],
   ['delivery-slabs', 'Delivery Slabs', Truck],
   ['delivery-boys', 'Delivery Boys', Truck],
   ['theme', 'Theme Settings', Palette],
@@ -38,6 +44,9 @@ const fieldOptions = {
   cod_enabled: [['1', 'Enabled'], ['0', 'Disabled']],
   full_payment_enabled: [['1', 'Enabled'], ['0', 'Disabled']],
   customer_login_required: [['0', 'Guest checkout allowed'], ['1', 'Login required']]
+  ,
+  destination_type: [['none', 'None'], ['product', 'Product'], ['category', 'Category'], ['offer', 'Offer'], ['custom_url', 'Custom URL']],
+  display_frequency: [['session', 'Once per session'], ['daily', 'Once per day'], ['every_visit', 'Every visit']]
 };
 
 const prepOptions = [10, 15, 20, 30];
@@ -450,11 +459,12 @@ export default function AdminPage() {
   async function saveResource() {
     try {
       let payload = { ...form };
-      if (active === 'products' && productImageFile) {
+      if (productImageFile && (active === 'products' || active === 'categories' || active === 'promotional-banners' || active === 'promotional-popups')) {
         const uploadForm = new FormData();
         uploadForm.append('image', productImageFile);
-        uploadForm.append('name', payload.name || 'product');
-        const uploaded = await adminUploadRequest('/admin/product-image', uploadForm);
+        uploadForm.append('name', payload.name || payload.title || 'image');
+        const uploadPath = active === 'products' ? '/admin/product-image' : active === 'categories' ? '/admin/category-image' : '/admin/promotion-image';
+        const uploaded = await adminUploadRequest(uploadPath, uploadForm);
         payload = { ...payload, image_url: uploaded.image_url };
       }
       if (editing) await adminRequest(`/admin/${active}/${editing}`, { method: 'PUT', body: JSON.stringify(payload) });
@@ -648,7 +658,8 @@ export default function AdminPage() {
       return <select value={value || ''} onChange={e => onChange(e.target.value)}><option value="">Select</option>{options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}</select>;
     }
     if (field.includes('description') || field.includes('address')) return <textarea value={value || ''} onChange={e => onChange(e.target.value)} />;
-    const numberFields = ['price','stock','low_stock_threshold','discount_value','min_order_value','max_discount','overall_usage_limit','per_customer_limit','buy_qty','get_qty','scope_id','category_id','min_km','max_km','charge','sort_order','partial_payment_value','minimum_order','restaurant_latitude','restaurant_longitude'];
+    const numberFields = ['price','stock','low_stock_threshold','discount_value','min_order_value','max_discount','overall_usage_limit','per_customer_limit','buy_qty','get_qty','scope_id','category_id','min_km','max_km','charge','sort_order','display_order','partial_payment_value','minimum_order','restaurant_latitude','restaurant_longitude'];
+    if (field.endsWith('_at')) return <input type="datetime-local" value={value || ''} onChange={e => onChange(e.target.value)} />;
     return <input type={numberFields.includes(field) ? 'number' : 'text'} value={value || ''} onChange={e => onChange(e.target.value)} />;
   }
 
@@ -714,9 +725,13 @@ export default function AdminPage() {
         </div>
         <nav>
           {tabs.map(([id, label, Icon]) => (
-            <button className={active === id ? 'admin-nav active' : 'admin-nav'} key={id} onClick={() => { setActive(id); setMobileNav(false); }}>
-              <Icon size={18} /> {label}
-            </button>
+            <div key={id}>
+              {id === 'promotional-banners' ? <span className="admin-nav-section">Promotional Content</span> : null}
+              {id === 'delivery-slabs' ? <span className="admin-nav-section">Operations</span> : null}
+              <button className={active === id ? 'admin-nav active' : 'admin-nav'} onClick={() => { setActive(id); setMobileNav(false); }}>
+                <Icon size={18} /> {label}
+              </button>
+            </div>
           ))}
         </nav>
         <button className="admin-nav" onClick={logout}><LogOut size={18} /> Logout</button>
@@ -748,8 +763,8 @@ export default function AdminPage() {
             <section className="panel">
               <div className="panel-heading"><h2>{editing ? 'Edit' : 'Add'} {active.replace('-', ' ')}</h2><p>Changes save through the existing PHP admin API.</p></div>
               <div className="form-grid">
-                {resourceFields.map(field => field === 'image_url' && active === 'products'
-                  ? <ProductImageUpload key={field} value={form.image_url || ''} file={productImageFile} preview={productImagePreview} onSelect={selectProductImage} onRemove={() => { clearProductImageSelection(); setForm({ ...form, image_url: '' }); }} />
+                {resourceFields.map(field => field === 'image_url' && (active === 'products' || active === 'categories' || active === 'promotional-banners' || active === 'promotional-popups')
+                  ? <ProductImageUpload key={field} label={active === 'products' ? 'Product Image' : active === 'categories' ? 'Category Image' : 'Promotion Image'} value={form.image_url || ''} file={productImageFile} preview={productImagePreview} onSelect={selectProductImage} onRemove={() => { clearProductImageSelection(); setForm({ ...form, image_url: '' }); }} />
                   : <label key={field}>{field.replaceAll('_', ' ')}{adminField(field, form[field], value => setForm({ ...form, [field]: value }))}</label>)}
               </div>
               <div className="action-row">
@@ -892,7 +907,7 @@ export default function AdminPage() {
   );
 }
 
-function ProductImageUpload({ value, file, preview, onSelect, onRemove }) {
+function ProductImageUpload({ label = 'Product Image', value, file, preview, onSelect, onRemove }) {
   const inputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
   const currentPreview = preview || (value ? productImage({ image_url: value }) : '');
@@ -906,7 +921,7 @@ function ProductImageUpload({ value, file, preview, onSelect, onRemove }) {
 
   return (
     <div className="upload-field">
-      <span>Product Image</span>
+      <span>{label}</span>
       <div
         className={dragging ? 'image-dropzone dragging' : 'image-dropzone'}
         onDragOver={event => { event.preventDefault(); setDragging(true); }}
@@ -915,9 +930,9 @@ function ProductImageUpload({ value, file, preview, onSelect, onRemove }) {
       >
         {currentPreview ? (
           <div className="image-preview-card">
-            <img src={currentPreview} alt="Product preview" />
+            <img src={currentPreview} alt={`${label} preview`} />
             <div>
-              <strong>{file?.name || 'Current product image'}</strong>
+              <strong>{file?.name || `Current ${label.toLowerCase()}`}</strong>
               <p>{file ? fileSize : value}</p>
               <div className="action-row">
                 <button type="button" className="ghost" onClick={() => inputRef.current?.click()}><Upload size={16} /> Replace Image</button>
