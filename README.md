@@ -205,7 +205,13 @@ Publish directory: frontend/.next
 Node version: 20
 ```
 
-4. Netlify automatically applies its Next.js runtime during deployment.
+4. Keep the Netlify Next.js runtime plugin enabled from `netlify.toml`:
+
+```text
+@netlify/plugin-nextjs
+```
+
+This is required so Netlify serves App Router pages through the Next runtime instead of treating `.next` as a plain static folder.
 5. Add all frontend environment variables from `frontend/.env.production.example`.
 6. Set `NEXT_PUBLIC_API_BASE` to the public Hostinger PHP backend URL, for example `https://api.your-domain.com`.
 7. Deploy the site.
@@ -339,6 +345,6 @@ Vercel frontend:
 Netlify frontend:
 
 - Deploy this repository with `netlify.toml` at the repository root.
-- Netlify builds from `frontend` and publishes `frontend/.next`.
+- Netlify builds from `frontend`, publishes `frontend/.next`, and uses `@netlify/plugin-nextjs` for App Router routing.
 - Required source files are `netlify.toml`, `frontend/app`, `frontend/public`, `frontend/package.json`, `frontend/package-lock.json`, `frontend/next.config.mjs`.
 - Do not upload or commit `frontend/.env.local`, `frontend/.next`, or `frontend/node_modules`.
