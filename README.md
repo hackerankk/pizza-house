@@ -36,7 +36,7 @@ Backend values go in `backend/.env` on Hostinger. Use `backend/.env.production.e
 | `VAPID_PRIVATE_KEY` | Web Push private key |
 | `VAPID_SUBJECT` | Contact subject, for example `mailto:owner@your-domain.com` |
 
-Frontend values go in Vercel project environment variables. Use `frontend/.env.production.example` as the template.
+Frontend values go in Vercel or Netlify project environment variables. Use `frontend/.env.production.example` as the template.
 
 | Variable | Purpose |
 |---|---|
@@ -45,7 +45,7 @@ Frontend values go in Vercel project environment variables. Use `frontend/.env.p
 | `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | Google Maps browser API key |
 | `NEXT_PUBLIC_VAPID_PUBLIC_KEY` | Web Push public key |
 
-Do not put `RAZORPAY_KEY_SECRET`, database credentials, WhatsApp token, or VAPID private key in any Vercel `NEXT_PUBLIC_*` variable.
+Do not put `RAZORPAY_KEY_SECRET`, database credentials, WhatsApp token, or VAPID private key in any frontend `NEXT_PUBLIC_*` variable.
 
 ## Local Setup
 
@@ -190,12 +190,33 @@ A 1-minute or 5-minute interval is reasonable.
 9. Deploy.
 10. After Vercel gives the production URL, update Hostinger `FRONTEND_URL` to that exact URL.
 
+## Netlify Frontend Deployment
+
+This repository includes `netlify.toml` for the monorepo layout. It tells Netlify to build the Next.js app from `frontend`.
+
+1. Push or upload the project to a Git provider connected to Netlify.
+2. Create a new Netlify site from that repository.
+3. Netlify should read `netlify.toml` automatically. If entering settings manually, use:
+
+```text
+Base directory: frontend
+Build command: npm run build
+Publish directory: frontend/.next
+Node version: 20
+```
+
+4. Netlify automatically applies its Next.js runtime during deployment.
+5. Add all frontend environment variables from `frontend/.env.production.example`.
+6. Set `NEXT_PUBLIC_API_BASE` to the public Hostinger PHP backend URL, for example `https://api.your-domain.com`.
+7. Deploy the site.
+8. After Netlify gives the production URL, update Hostinger `FRONTEND_URL` to that exact Netlify URL.
+
 ## Razorpay Setup
 
 1. Create or open a Razorpay account.
 2. Generate API keys in the Razorpay Dashboard.
 3. Add the key ID to backend `.env` as `RAZORPAY_KEY_ID`.
-4. Add the key ID to Vercel as `NEXT_PUBLIC_RAZORPAY_KEY_ID`.
+4. Add the key ID to Vercel/Netlify as `NEXT_PUBLIC_RAZORPAY_KEY_ID`.
 5. Add the key secret only to backend `.env` as `RAZORPAY_KEY_SECRET`.
 6. Do not expose `RAZORPAY_KEY_SECRET` in Vercel or browser code.
 7. Test full payment and partial payment in Razorpay test mode first.
@@ -205,8 +226,8 @@ A 1-minute or 5-minute interval is reasonable.
 
 1. In Google Cloud Console, enable Maps JavaScript API, Places API, and Geocoding API.
 2. Create a browser API key.
-3. Restrict the key to the Vercel frontend domain.
-4. Add it to Vercel as `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`.
+3. Restrict the key to the frontend domain, such as the Vercel or Netlify production domain.
+4. Add it to Vercel/Netlify as `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`.
 5. Optionally add the same key to backend `.env` as `GOOGLE_MAPS_API_KEY` for operational reference.
 6. The checkout location picker uses Maps JavaScript for the map, Places for address search, and Geocoding for reverse geocoding the selected pin.
 7. Delivery charges are always verified server-side using restaurant coordinates and configured delivery slabs.
@@ -225,7 +246,7 @@ A 1-minute or 5-minute interval is reasonable.
 
 1. Generate a VAPID key pair.
 2. Add public/private values to backend `.env` as `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`.
-3. Add the public key to Vercel as `NEXT_PUBLIC_VAPID_PUBLIC_KEY`.
+3. Add the public key to Vercel/Netlify as `NEXT_PUBLIC_VAPID_PUBLIC_KEY`.
 4. Set `VAPID_SUBJECT` to a valid contact, for example `mailto:owner@your-domain.com`.
 5. Run `composer install --no-dev --optimize-autoloader` on Hostinger so `minishlink/web-push` is available.
 6. Run the notification cron job.
@@ -314,3 +335,10 @@ Vercel frontend:
 - Deploy the `frontend` directory as the Vercel project root.
 - Required source files are `frontend/app`, `frontend/public`, `frontend/package.json`, `frontend/package-lock.json`, `frontend/next.config.mjs`.
 - Do not upload `frontend/.env.local`, `frontend/.next`, or `frontend/node_modules` to Vercel.
+
+Netlify frontend:
+
+- Deploy this repository with `netlify.toml` at the repository root.
+- Netlify builds from `frontend` and publishes `frontend/.next`.
+- Required source files are `netlify.toml`, `frontend/app`, `frontend/public`, `frontend/package.json`, `frontend/package-lock.json`, `frontend/next.config.mjs`.
+- Do not upload or commit `frontend/.env.local`, `frontend/.next`, or `frontend/node_modules`.
