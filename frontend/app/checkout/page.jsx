@@ -5,13 +5,16 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Script from 'next/script';
 import { Bike, CheckCircle2, CreditCard, Home, Loader2, LogIn, MapPin, Minus, Plus, ShoppingBag, Store, Trash2, UserRound } from 'lucide-react';
-import { api, applyTheme, guestOrderToken, inr, orderAccessQuery, productImage, readCart, rememberGuestOrder, saveCart, token } from '../lib';
+import { api, applyTheme, guestOrderToken, inr, orderAccessQuery, productImage, readCart, rememberGuestOrder, saveCart, storedThemeMode, setThemeMode, token } from '../lib';
 
 function CheckoutContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [settings, setSettings] = useState({});
+  const [themeMode, setThemeModeState] = useState('system');
+  const [storeStatus, setStoreStatus] = useState(null);
   const [razorpayKeyId, setRazorpayKeyId] = useState('');
+  const [googleMapsKey, setGoogleMapsKey] = useState('');
   const [cart, setCart] = useState([]);
   const [cartReady, setCartReady] = useState(false);
   const [orderType, setOrderType] = useState('delivery');
@@ -42,11 +45,14 @@ function CheckoutContent() {
     setCart(readCart());
     setCartReady(true);
     setCouponCode(localStorage.getItem('pizza_house_coupon') || '');
-    Promise.all([api('/theme'), api('/settings')])
-      .then(([themeData, settingsData]) => {
-        applyTheme(themeData.theme || {});
+    setThemeModeState(storedThemeMode() || 'system');
+    Promise.all([api('/theme'), api('/settings'), api('/store/status')])
+      .then(([themeData, settingsData, storeData]) => {
+        applyTheme(themeData.theme || {}, settingsData.settings?.customer_default_theme || 'system');
         setSettings(settingsData.settings || {});
+        setStoreStatus(storeData.store || null);
         setRazorpayKeyId(settingsData.razorpay_key_id || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || '');
+        setGoogleMapsKey(settingsData.google_maps_api_key || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '');
       })
       .catch(err => notify(err.message, 'error'));
     if (token()) {
@@ -85,12 +91,18 @@ function CheckoutContent() {
     }
   }, [orderType]);
 
-  const hasGoogleMapsKey = Boolean(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY);
+  useEffect(() => {
+    if ((settings.delivery_enabled || '1') !== '1' && (settings.takeaway_enabled || '1') === '1') setOrderType('takeaway');
+    if ((settings.takeaway_enabled || '1') !== '1' && (settings.delivery_enabled || '1') === '1') setOrderType('delivery');
+    if (!razorpayKeyId && paymentMode !== 'cod' && (settings.cod_enabled || '0') === '1') setPaymentMode('cod');
+  }, [settings, razorpayKeyId, paymentMode]);
+
+  const hasGoogleMapsKey = Boolean(googleMapsKey);
   const googleMapsReady = mapLoaded && hasGoogleMapsKey && typeof window !== 'undefined' && Boolean(window.google?.maps);
 
   function handleMapsLoaded() {
     if (!window.google?.maps) {
-      setMapsError('Google Maps script loaded but window.google.maps is unavailable. Check Maps JavaScript API access for NEXT_PUBLIC_GOOGLE_MAPS_API_KEY.');
+      setMapsError('Google Maps script loaded but window.google.maps is unavailable. Check Maps JavaScript API access for the configured Maps key.');
       return;
     }
     setMapsError('');
@@ -198,6 +210,11 @@ function CheckoutContent() {
   function notify(text, type = 'info') {
     setMessage(text);
     setMessageType(type);
+  }
+
+  function changeThemeMode(mode) {
+    setThemeModeState(mode);
+    setThemeMode(mode);
   }
 
   const subtotal = cart.reduce((sum, line) => sum + Number(line.price) * line.quantity, 0);
@@ -316,13 +333,20 @@ function CheckoutContent() {
     setLoading(true);
     try {
       if (!cart.length) throw new Error('Cart is empty');
+      const currentStatus = await api('/store/status');
+      setStoreStatus(currentStatus.store || null);
+      if (currentStatus.store && !currentStatus.store.is_open) throw new Error(currentStatus.store.message || 'Ordering is currently closed.');
       const loginRequired = (settings.customer_login_required || '0') === '1';
-      if (loginRequired && !customerSession) throw new Error('Please register or login before placing the order.');
+      if ((orderType === 'delivery' && (settings.delivery_enabled || '1') !== '1') || (orderType === 'takeaway' && (settings.takeaway_enabled || '1') !== '1')) {
+        throw new Error(`${orderType === 'delivery' ? 'Delivery' : 'Takeaway'} is currently unavailable.`);
+      }
+      if ((loginRequired || (settings.guest_checkout_enabled || '1') !== '1') && !customerSession) throw new Error('Please register or login before placing the order.');
       if (!customerSession) {
         if (!customer.name.trim()) throw new Error('Guest name is required.');
         if (!customer.phone.trim()) throw new Error('Guest phone is required.');
         if (customer.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer.email.trim())) throw new Error('Enter a valid guest email address.');
       }
+      if (paymentMode !== 'cod' && !razorpayKeyId) throw new Error('Online payment is currently unavailable.');
       if (orderType === 'delivery') {
         if (!delivery.latitude || !delivery.longitude) throw new Error('Choose and confirm your delivery location before placing the order.');
         if (!delivery.address.trim()) throw new Error('Delivery address is required.');
@@ -360,6 +384,7 @@ function CheckoutContent() {
         finishOrder(data.order.id, data.guest_access_token);
       }
     } catch (err) {
+      if (err.data?.code === 'STORE_CLOSED') setStoreStatus(err.data.store || null);
       notify(err.message, 'error');
     } finally {
       setLoading(false);
@@ -445,16 +470,29 @@ function CheckoutContent() {
   }
 
   const customerLoginRequired = (settings.customer_login_required || '0') === '1';
+  const guestCheckoutEnabled = (settings.guest_checkout_enabled || '1') === '1';
+  const deliveryEnabled = (settings.delivery_enabled || '1') === '1';
+  const takeawayEnabled = (settings.takeaway_enabled || '1') === '1';
+  const customerThemeEnabled = (settings.customer_theme_enabled || '1') === '1';
+  const customerDarkModeEnabled = (settings.customer_dark_mode_enabled || '1') === '1';
+  const razorpayEnabled = Boolean(razorpayKeyId);
+  const mapsFeatureEnabled = Boolean(googleMapsKey);
   const cta = orderType === 'takeaway' ? 'Pay & Place Takeaway Order' : 'Pay & Place Order';
+  const selectedOrderTypeDisabled = (orderType === 'delivery' && !deliveryEnabled) || (orderType === 'takeaway' && !takeawayEnabled);
+  const selectedPaymentDisabled = paymentMode !== 'cod' && !razorpayEnabled;
 
   return (
     <main className="checkout-page">
       <Script src="https://checkout.razorpay.com/v1/checkout.js" strategy="afterInteractive" />
-      {hasGoogleMapsKey ? <Script id="google-maps-checkout" src={`https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY)}&libraries=places`} strategy="afterInteractive" onLoad={handleMapsLoaded} onError={() => setMapsError('Google Maps JavaScript could not load. Verify NEXT_PUBLIC_GOOGLE_MAPS_API_KEY in frontend/.env.local, restart Next.js, and ensure Maps JavaScript API is enabled for this key.')} /> : null}
+      {hasGoogleMapsKey ? <Script id="google-maps-checkout" src={`https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(googleMapsKey)}&libraries=places`} strategy="afterInteractive" onLoad={handleMapsLoaded} onError={() => setMapsError('Google Maps JavaScript could not load. Verify the configured Maps key and ensure Maps JavaScript API is enabled for this key.')} /> : null}
       <header className="checkout-header">
         <div className="container header-inner">
           <Link href="/" className="brand mark"><span className="brand-icon">TP</span><span>The Pizza House</span></Link>
+          <div className="header-actions">
+            {storeStatus ? <span className={storeStatus.is_open ? 'store-status-pill open' : 'store-status-pill closed'}>{storeStatus.is_open ? 'Open - Orders Available' : 'Closed - Orders Unavailable'}</span> : null}
+            {customerThemeEnabled ? <select className="theme-mode-select" aria-label="Theme mode" value={themeMode} onChange={e => changeThemeMode(e.target.value)}><option value="light">Light</option>{customerDarkModeEnabled ? <option value="dark">Dark</option> : null}<option value="system">System</option></select> : null}
           <Link className="cart-pill" href="/#cart"><ShoppingBag size={18} /><span>{cartCount}</span></Link>
+          </div>
         </div>
       </header>
 
@@ -465,14 +503,15 @@ function CheckoutContent() {
       </section>
 
       <div className="container">{message ? <p className={`notice ${messageType}`}>{message}</p> : null}</div>
+      <div className="container">{storeStatus && !storeStatus.is_open ? <p className="notice warning">Ordering is currently closed. {storeStatus.next_opening ? `Next opening: ${storeStatus.next_opening.day} ${storeStatus.next_opening.open}-${storeStatus.next_opening.close}` : 'Please check back later.'}</p> : null}</div>
 
       <section className="container checkout-grid dedicated-checkout">
         <div className="checkout-flow">
           <section className="checkout-panel">
             <div className="section-kicker"><CheckCircle2 size={16} /> Order type</div>
             <div className="order-type-grid">
-              <button className={orderType === 'delivery' ? 'order-type-card selected' : 'order-type-card'} onClick={() => setOrderType('delivery')}><Bike size={24} /><span>Delivery</span><small>Address, map pin, delivery slab</small></button>
-              <button className={orderType === 'takeaway' ? 'order-type-card selected' : 'order-type-card'} onClick={() => setOrderType('takeaway')}><Store size={24} /><span>Takeaway</span><small>Pickup from restaurant, full payment only</small></button>
+              <button className={orderType === 'delivery' ? 'order-type-card selected' : 'order-type-card'} onClick={() => setOrderType('delivery')} disabled={!deliveryEnabled}><Bike size={24} /><span>Delivery</span><small>{deliveryEnabled ? 'Address, map pin, delivery slab' : 'Currently unavailable'}</small></button>
+              <button className={orderType === 'takeaway' ? 'order-type-card selected' : 'order-type-card'} onClick={() => setOrderType('takeaway')} disabled={!takeawayEnabled}><Store size={24} /><span>Takeaway</span><small>{takeawayEnabled ? 'Pickup from restaurant, full payment only' : 'Currently unavailable'}</small></button>
             </div>
           </section>
 
@@ -486,15 +525,15 @@ function CheckoutContent() {
                   <span>{customerSession.email}{customerSession.phone ? ` | ${customerSession.phone}` : ''}</span>
                 </div>
               </div>
-            ) : customerLoginRequired ? (
+            ) : customerLoginRequired || !guestCheckoutEnabled ? (
               <div className="checkout-login-required">
-                <p className="notice warning">Admin has enabled customer login for checkout. Please login or register to continue.</p>
+                <p className="notice warning">Customer login is required before checkout. Please login or register to continue.</p>
                 <Link className="button" href="/login?return_to=/checkout"><LogIn size={16} /> Login / Register</Link>
               </div>
             ) : (
               <p className="small-note">Guest checkout is available. Add your contact details below, or <Link href="/login?return_to=/checkout">login to save the order to your account</Link>.</p>
             )}
-            {!customerSession && !customerLoginRequired ? <div className="form-grid two">
+            {!customerSession && !customerLoginRequired && guestCheckoutEnabled ? <div className="form-grid two">
               <input placeholder="Name" value={customer.name} onChange={e => setCustomer({ ...customer, name: e.target.value })} />
               <input placeholder="Mobile number" value={customer.phone} onChange={e => setCustomer({ ...customer, phone: e.target.value })} />
               <input placeholder="Email" value={customer.email} onChange={e => setCustomer({ ...customer, email: e.target.value })} />
@@ -521,13 +560,13 @@ function CheckoutContent() {
                     <strong>Choose delivery location</strong>
                     <button className="ghost" onClick={useDeviceLocation} disabled={locationLoading}><MapPin size={16} /> Use my current location</button>
                   </div>
-                  {hasGoogleMapsKey ? (
+                  {hasGoogleMapsKey && mapsFeatureEnabled ? (
                     <>
                       <input ref={autocompleteInputRef} className="location-search" placeholder="Search your delivery location" />
                       <div id="checkout-map" className="map-panel" />
                     </>
                   ) : (
-                    <div className="map-fallback">NEXT_PUBLIC_GOOGLE_MAPS_API_KEY is not configured in frontend/.env.local. Restart the Next.js dev server after adding it.</div>
+                    <div className="map-fallback">Google Maps is currently unavailable. Add a Maps key in Admin Settings Integrations or enable Maps from Feature Controls.</div>
                   )}
                   {mapsError ? <p className="notice error">{mapsError}</p> : null}
                   {locationStatus ? <p className="location-status">{locationLoading ? <Loader2 className="spin" size={14} /> : null}{locationStatus}</p> : null}
@@ -562,12 +601,12 @@ function CheckoutContent() {
             <input placeholder="Coupon code" value={couponCode} onChange={e => { const code = e.target.value.toUpperCase(); setCouponCode(code); localStorage.setItem('pizza_house_coupon', code); setPreview(null); }} />
             {orderType === 'delivery' ? (
               <div className="payment-options">
-                <label className={paymentMode === 'full' ? 'payment-card selected' : 'payment-card'}><input type="radio" name="payment_mode" checked={paymentMode === 'full'} onChange={() => setPaymentMode('full')} /><span>Full payment</span></label>
-                {(settings.partial_payment_enabled || '0') === '1' ? <label className={paymentMode === 'partial' ? 'payment-card selected' : 'payment-card'}><input type="radio" name="payment_mode" checked={paymentMode === 'partial'} onChange={() => setPaymentMode('partial')} /><span>Partial payment</span></label> : null}
+                {razorpayEnabled ? <label className={paymentMode === 'full' ? 'payment-card selected' : 'payment-card'}><input type="radio" name="payment_mode" checked={paymentMode === 'full'} onChange={() => setPaymentMode('full')} /><span>Full payment</span></label> : null}
+                {razorpayEnabled && (settings.partial_payment_enabled || '0') === '1' ? <label className={paymentMode === 'partial' ? 'payment-card selected' : 'payment-card'}><input type="radio" name="payment_mode" checked={paymentMode === 'partial'} onChange={() => setPaymentMode('partial')} /><span>Partial payment</span></label> : null}
                 {(settings.cod_enabled || '0') === '1' ? <label className={paymentMode === 'cod' ? 'payment-card selected' : 'payment-card'}><input type="radio" name="payment_mode" checked={paymentMode === 'cod'} onChange={() => setPaymentMode('cod')} /><span>COD / Pay later</span></label> : null}
               </div>
             ) : (
-              <div className="payment-card selected full-width"><CreditCard size={18} /><span>Razorpay full payment only</span></div>
+              <div className="payment-card selected full-width"><CreditCard size={18} /><span>{razorpayEnabled ? 'Razorpay full payment only' : 'Online payment currently unavailable'}</span></div>
             )}
             {paymentMode === 'partial' && orderType === 'delivery' ? (
               <div className="payment-breakdown">
@@ -595,7 +634,7 @@ function CheckoutContent() {
             <div><span>Paid Now</span><strong>{inr(paymentMode === 'cod' ? 0 : advance)}</strong></div>
             <div><span>Remaining</span><strong>{inr(paymentMode === 'cod' ? total : remaining)}</strong></div>
           </div>
-          <button className="full-width mobile-sticky-cta" onClick={placeOrder} disabled={loading || !cart.length}>{loading ? <Loader2 className="spin" size={16} /> : <CreditCard size={16} />}{loading ? 'Processing payment...' : cta}</button>
+          <button className="full-width mobile-sticky-cta" onClick={placeOrder} disabled={loading || !cart.length || (storeStatus && !storeStatus.is_open) || selectedOrderTypeDisabled || selectedPaymentDisabled}>{loading ? <Loader2 className="spin" size={16} /> : <CreditCard size={16} />}{loading ? 'Processing payment...' : storeStatus && !storeStatus.is_open ? 'Ordering Closed' : selectedOrderTypeDisabled ? 'Order Type Unavailable' : selectedPaymentDisabled ? 'Payment Unavailable' : cta}</button>
           <p className="small-note">Prices, stock, coupon, BOGO, delivery, payment mode, and Razorpay verification are enforced by the PHP backend.</p>
         </aside>
       </section>

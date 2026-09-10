@@ -14,16 +14,24 @@ function LoginContent() {
   const [mode, setMode] = useState(initialMode);
   const [form, setForm] = useState({ name: '', phone: '', email: '', password: '' });
   const [guestAllowed, setGuestAllowed] = useState(true);
+  const [customerLoginEnabled, setCustomerLoginEnabled] = useState(true);
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    api('/theme').then(t => applyTheme(t.theme)).catch(() => {});
-    api('/settings').then(data => setGuestAllowed((data.settings?.customer_login_required || '0') !== '1')).catch(() => {});
+    Promise.all([api('/theme'), api('/settings')]).then(([themeData, settingsData]) => {
+      applyTheme(themeData.theme, settingsData.settings?.customer_default_theme || 'system');
+      setGuestAllowed((settingsData.settings?.customer_login_required || '0') !== '1' && (settingsData.settings?.guest_checkout_enabled || '1') === '1');
+      setCustomerLoginEnabled((settingsData.settings?.customer_login_enabled || '1') === '1');
+    }).catch(() => {});
   }, []);
 
   async function submit(event) {
     event.preventDefault();
+    if (!customerLoginEnabled) {
+      setMessage('Customer login is currently disabled.');
+      return;
+    }
     setLoading(true);
     setMessage('');
     try {
@@ -54,10 +62,10 @@ function LoginContent() {
         </div>
         <form className="panel auth-card" onSubmit={submit}>
           {message ? <p className="notice error">{message}</p> : null}
-          <div className="auth-tabs">
+          {customerLoginEnabled ? <div className="auth-tabs">
             <button type="button" className={mode === 'login' ? 'ghost active' : 'ghost'} onClick={() => setMode('login')}><LogIn size={16} /> Login</button>
             <button type="button" className={mode === 'register' ? 'ghost active' : 'ghost'} onClick={() => setMode('register')}><UserPlus size={16} /> Register</button>
-          </div>
+          </div> : <p className="notice warning">Customer login and registration are currently disabled by the restaurant.</p>}
           {mode === 'register' ? (
             <>
               <label>Name<input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required /></label>
@@ -66,7 +74,7 @@ function LoginContent() {
           ) : null}
           <label>Email<input type="email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} required /></label>
           <label>Password<input type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} required minLength={8} /></label>
-          <button type="submit" disabled={loading}>{loading ? <Loader2 className="spin" size={16} /> : mode === 'login' ? <LogIn size={16} /> : <UserPlus size={16} />}{mode === 'login' ? 'Login' : 'Register'}</button>
+          <button type="submit" disabled={loading || !customerLoginEnabled}>{loading ? <Loader2 className="spin" size={16} /> : mode === 'login' ? <LogIn size={16} /> : <UserPlus size={16} />}{mode === 'login' ? 'Login' : 'Register'}</button>
           {guestAllowed ? <Link className="small-note" href="/#menu">Continue as guest</Link> : null}
         </form>
       </section>

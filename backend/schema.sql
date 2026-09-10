@@ -400,7 +400,25 @@ INSERT INTO settings (setting_key, setting_value) VALUES
 ('partial_payment_value','30'),
 ('cod_enabled','1'),
 ('full_payment_enabled','1'),
-('customer_login_required','0')
+('customer_login_required','0'),
+('razorpay_key_id',''),
+('razorpay_key_secret',''),
+('razorpay_mode','test'),
+('razorpay_enabled','1'),
+('google_maps_api_key',''),
+('google_maps_enabled','1'),
+('accept_orders','1'),
+('force_close_orders','0'),
+('customer_theme_enabled','1'),
+('customer_dark_mode_enabled','1'),
+('online_ordering_enabled','1'),
+('delivery_enabled','1'),
+('takeaway_enabled','1'),
+('guest_checkout_enabled','1'),
+('customer_login_enabled','1'),
+('order_schedule','{"monday":{"enabled":"1","open":"11:00","close":"23:00"},"tuesday":{"enabled":"1","open":"11:00","close":"23:00"},"wednesday":{"enabled":"1","open":"11:00","close":"23:00"},"thursday":{"enabled":"1","open":"11:00","close":"23:00"},"friday":{"enabled":"1","open":"11:00","close":"23:00"},"saturday":{"enabled":"1","open":"11:00","close":"23:00"},"sunday":{"enabled":"1","open":"11:00","close":"23:00"}}'),
+('customer_default_theme','system'),
+('admin_theme_mode','system')
 ON DUPLICATE KEY UPDATE setting_value = setting_value;
 
 INSERT INTO theme_settings (setting_key, setting_value) VALUES

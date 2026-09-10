@@ -16,7 +16,7 @@ export default function AccountPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api('/theme').then(t => applyTheme(t.theme)).catch(() => {});
+    Promise.all([api('/theme'), api('/settings')]).then(([themeData, settingsData]) => applyTheme(themeData.theme, settingsData.settings?.customer_default_theme || 'system')).catch(() => {});
     api('/auth/me')
       .then(async me => {
         if (me.user?.role !== 'customer') throw new Error('Please sign in with a customer account.');

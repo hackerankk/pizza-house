@@ -292,6 +292,28 @@ function ensure_order_management_schema(): void {
         INDEX idx_promotional_popups_dates (start_at, end_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     $pdo->prepare('INSERT IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?)')->execute(['customer_login_required', '0']);
+    foreach ([
+        'razorpay_key_id' => '',
+        'razorpay_key_secret' => '',
+        'razorpay_mode' => 'test',
+        'razorpay_enabled' => '1',
+        'google_maps_api_key' => '',
+        'google_maps_enabled' => '1',
+        'accept_orders' => '1',
+        'force_close_orders' => '0',
+        'customer_theme_enabled' => '1',
+        'customer_dark_mode_enabled' => '1',
+        'online_ordering_enabled' => '1',
+        'delivery_enabled' => '1',
+        'takeaway_enabled' => '1',
+        'guest_checkout_enabled' => '1',
+        'customer_login_enabled' => '1',
+        'order_schedule' => default_order_schedule_json(),
+        'customer_default_theme' => 'system',
+        'admin_theme_mode' => 'system',
+    ] as $key => $value) {
+        $pdo->prepare('INSERT IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?)')->execute([$key, $value]);
+    }
     $done = true;
 }
 
@@ -616,6 +638,286 @@ function settings(): array {
     return array_column($rows, 'setting_value', 'setting_key');
 }
 
+function integration_setting_keys(): array {
+    return ['razorpay_key_id','razorpay_key_secret','razorpay_mode','razorpay_enabled','google_maps_api_key','google_maps_enabled'];
+}
+
+function default_order_schedule(): array {
+    $days = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+    $schedule = [];
+    foreach ($days as $day) {
+        $schedule[$day] = ['enabled' => '1', 'open' => '11:00', 'close' => '23:00'];
+    }
+    return $schedule;
+}
+
+function default_order_schedule_json(): string {
+    return json_encode(default_order_schedule(), JSON_UNESCAPED_SLASHES);
+}
+
+function normalize_time_value($value, string $field): string {
+    $value = trim((string)$value);
+    if (!preg_match('/^\d{2}:\d{2}$/', $value)) {
+        json_response(['error' => "$field must be HH:MM"], 422);
+    }
+    [$hour, $minute] = array_map('intval', explode(':', $value));
+    if ($hour < 0 || $hour > 23 || $minute < 0 || $minute > 59) {
+        json_response(['error' => "$field must be a valid time"], 422);
+    }
+    return sprintf('%02d:%02d', $hour, $minute);
+}
+
+function order_schedule_from_settings(?array $settings = null): array {
+    $settings = $settings ?? settings();
+    $decoded = json_decode((string)($settings['order_schedule'] ?? ''), true);
+    $defaults = default_order_schedule();
+    if (!is_array($decoded)) {
+        return $defaults;
+    }
+    foreach ($defaults as $day => $default) {
+        $row = is_array($decoded[$day] ?? null) ? $decoded[$day] : [];
+        $defaults[$day] = [
+            'enabled' => ((string)($row['enabled'] ?? $default['enabled']) === '1') ? '1' : '0',
+            'open' => preg_match('/^\d{2}:\d{2}$/', (string)($row['open'] ?? '')) ? (string)$row['open'] : $default['open'],
+            'close' => preg_match('/^\d{2}:\d{2}$/', (string)($row['close'] ?? '')) ? (string)$row['close'] : $default['close'],
+        ];
+    }
+    return $defaults;
+}
+
+function normalize_order_schedule(array $schedule): array {
+    $normalized = default_order_schedule();
+    foreach ($normalized as $day => $default) {
+        $row = is_array($schedule[$day] ?? null) ? $schedule[$day] : [];
+        $normalized[$day] = [
+            'enabled' => ((string)($row['enabled'] ?? $default['enabled']) === '1') ? '1' : '0',
+            'open' => normalize_time_value($row['open'] ?? $default['open'], "$day opening time"),
+            'close' => normalize_time_value($row['close'] ?? $default['close'], "$day closing time"),
+        ];
+    }
+    return $normalized;
+}
+
+function minutes_from_time(string $time): int {
+    [$hour, $minute] = array_map('intval', explode(':', $time));
+    return $hour * 60 + $minute;
+}
+
+function order_availability(?DateTimeImmutable $now = null): array {
+    $settings = settings();
+    $timezone = new DateTimeZone('Asia/Kolkata');
+    $now = $now ? $now->setTimezone($timezone) : new DateTimeImmutable('now', $timezone);
+    $schedule = order_schedule_from_settings($settings);
+    $day = strtolower($now->format('l'));
+    $today = $schedule[$day] ?? ['enabled' => '0', 'open' => null, 'close' => null];
+    $masterOpen = (string)($settings['accept_orders'] ?? '1') === '1';
+    $forceClosed = (string)($settings['force_close_orders'] ?? '0') === '1';
+    $onlineOrdering = (string)($settings['online_ordering_enabled'] ?? '1') === '1';
+    $dayOpen = (string)($today['enabled'] ?? '0') === '1';
+    $insideWindow = false;
+    if ($dayOpen && !empty($today['open']) && !empty($today['close'])) {
+        $current = ((int)$now->format('H')) * 60 + (int)$now->format('i');
+        $open = minutes_from_time((string)$today['open']);
+        $close = minutes_from_time((string)$today['close']);
+        $insideWindow = $open === $close ? true : ($open < $close ? ($current >= $open && $current < $close) : ($current >= $open || $current < $close));
+    }
+    $isOpen = $masterOpen && !$forceClosed && $onlineOrdering && $dayOpen && $insideWindow;
+    $reason = $isOpen ? 'OPEN' : ($forceClosed ? 'FORCE_CLOSED' : (!$onlineOrdering ? 'ONLINE_ORDERING_DISABLED' : (!$masterOpen ? 'MASTER_OFF' : (!$dayOpen ? 'DAY_CLOSED' : 'OUTSIDE_HOURS'))));
+    $next = null;
+    if (!$isOpen) {
+        for ($i = 0; $i < 8; $i++) {
+            $candidate = $now->modify("+$i day");
+            $candidateDay = strtolower($candidate->format('l'));
+            $row = $schedule[$candidateDay] ?? null;
+            if ($row && (string)$row['enabled'] === '1') {
+                $nextTime = DateTimeImmutable::createFromFormat('Y-m-d H:i', $candidate->format('Y-m-d') . ' ' . $row['open'], $timezone);
+                if ($nextTime && $nextTime > $now) {
+                    $next = ['day' => $candidateDay, 'opens_at' => $nextTime->format('Y-m-d H:i:s'), 'open' => $row['open'], 'close' => $row['close']];
+                    break;
+                }
+            }
+        }
+    }
+    return [
+        'is_open' => $isOpen,
+        'code' => $isOpen ? 'STORE_OPEN' : 'STORE_CLOSED',
+        'reason' => $reason,
+        'message' => $isOpen ? 'Open - Orders Available' : 'Closed - Orders Unavailable',
+        'timezone' => 'Asia/Kolkata',
+        'current_time' => $now->format('Y-m-d H:i:s'),
+        'today' => ['day' => $day, ...$today],
+        'next_opening' => $next,
+        'accept_orders' => $masterOpen ? '1' : '0',
+        'force_close_orders' => $forceClosed ? '1' : '0',
+        'online_ordering_enabled' => $onlineOrdering ? '1' : '0',
+    ];
+}
+
+function enforce_store_open_for_order(): void {
+    $status = order_availability();
+    if (!$status['is_open']) {
+        json_response(['error' => $status['message'], 'code' => 'STORE_CLOSED', 'store' => $status], 409);
+    }
+}
+
+function masked_secret(?string $value): string {
+    $value = trim((string)$value);
+    return $value === '' ? '' : '********';
+}
+
+function sanitized_settings(array $settings, bool $includeIntegrations = false): array {
+    foreach (['razorpay_key_id','razorpay_key_secret','razorpay_mode','google_maps_api_key'] as $key) {
+        if (!$includeIntegrations) {
+            unset($settings[$key]);
+        } elseif (in_array($key, ['razorpay_key_secret', 'google_maps_api_key'], true)) {
+            $settings[$key] = masked_secret($settings[$key] ?? '');
+        }
+    }
+    return $settings;
+}
+
+function configured_setting(array $settings, string $key): string {
+    return trim((string)($settings[$key] ?? ''));
+}
+
+function razorpay_config(): array {
+    $s = settings();
+    $storedKey = configured_setting($s, 'razorpay_key_id');
+    $storedSecret = configured_setting($s, 'razorpay_key_secret');
+    $hasStoredConfig = $storedKey !== '' || $storedSecret !== '';
+    $enabled = (($s['razorpay_enabled'] ?? '1') === '1');
+    $key = $storedKey ?: trim((string)env('RAZORPAY_KEY_ID', ''));
+    $secret = $storedSecret ?: trim((string)env('RAZORPAY_KEY_SECRET', ''));
+    $mode = configured_setting($s, 'razorpay_mode') ?: (str_starts_with($key, 'rzp_live_') ? 'live' : 'test');
+    return [
+        'enabled' => $enabled,
+        'configured' => $enabled && $key !== '' && $secret !== '',
+        'key_id' => $enabled ? $key : '',
+        'key_secret' => $enabled ? $secret : '',
+        'mode' => in_array($mode, ['test', 'live'], true) ? $mode : 'test',
+        'source' => $hasStoredConfig ? 'admin' : 'env',
+    ];
+}
+
+function google_maps_config(): array {
+    $s = settings();
+    $storedKey = configured_setting($s, 'google_maps_api_key');
+    $hasStoredConfig = $storedKey !== '';
+    $enabled = (($s['google_maps_enabled'] ?? '1') === '1');
+    $key = $hasStoredConfig ? $storedKey : trim((string)env('GOOGLE_MAPS_API_KEY', ''));
+    return [
+        'enabled' => $enabled,
+        'configured' => $enabled && $key !== '',
+        'api_key' => $enabled ? $key : '',
+        'source' => $hasStoredConfig ? 'admin' : 'env',
+    ];
+}
+
+function public_runtime_settings(): array {
+    $razorpay = razorpay_config();
+    $maps = google_maps_config();
+    return [
+        'razorpay_key_id' => $razorpay['configured'] ? $razorpay['key_id'] : '',
+        'razorpay_mode' => $razorpay['mode'],
+        'razorpay_enabled' => $razorpay['configured'] ? '1' : '0',
+        'google_maps_api_key' => $maps['configured'] ? $maps['api_key'] : '',
+        'google_maps_enabled' => $maps['configured'] ? '1' : '0',
+    ];
+}
+
+function admin_integration_settings(): array {
+    $s = settings();
+    $razorpay = razorpay_config();
+    $maps = google_maps_config();
+    return [
+        'razorpay' => [
+            'key_id' => configured_setting($s, 'razorpay_key_id') ?: ($razorpay['source'] === 'env' ? masked_secret($razorpay['key_id']) : ''),
+            'key_secret' => masked_secret(configured_setting($s, 'razorpay_key_secret') ?: ($razorpay['source'] === 'env' ? $razorpay['key_secret'] : '')),
+            'mode' => $razorpay['mode'],
+            'enabled' => $razorpay['configured'] ? '1' : (($s['razorpay_enabled'] ?? '') === '0' ? '0' : '1'),
+            'configured' => $razorpay['configured'],
+            'source' => $razorpay['source'],
+        ],
+        'google_maps' => [
+            'api_key' => masked_secret(configured_setting($s, 'google_maps_api_key') ?: ($maps['source'] === 'env' ? $maps['api_key'] : '')),
+            'enabled' => $maps['configured'] ? '1' : (($s['google_maps_enabled'] ?? '') === '0' ? '0' : '1'),
+            'configured' => $maps['configured'],
+            'source' => $maps['source'],
+        ],
+    ];
+}
+
+function save_integration_settings(string $type, array $data): array {
+    $pdo = db();
+    if ($type === 'razorpay') {
+        if (isset($data['key_id']) && trim((string)$data['key_id']) !== '' && !preg_match('/^rzp_(test|live)_[A-Za-z0-9]+$/', trim((string)$data['key_id']))) {
+            json_response(['error' => 'Invalid Razorpay Key ID format'], 422);
+        }
+        if (isset($data['mode']) && !in_array($data['mode'], ['test', 'live'], true)) {
+            json_response(['error' => 'Razorpay mode must be test or live'], 422);
+        }
+        if (isset($data['enabled']) && !is_truthy_setting($data['enabled'])) {
+            json_response(['error' => 'Razorpay enabled must be 0 or 1'], 422);
+        }
+        $updates = [
+            'razorpay_enabled' => (string)($data['enabled'] ?? '1'),
+            'razorpay_mode' => (string)($data['mode'] ?? 'test'),
+        ];
+        if (array_key_exists('key_id', $data) && trim((string)$data['key_id']) !== '' && trim((string)$data['key_id']) !== '********') {
+            $updates['razorpay_key_id'] = trim((string)$data['key_id']);
+        }
+        if (array_key_exists('key_secret', $data) && trim((string)$data['key_secret']) !== '' && trim((string)$data['key_secret']) !== '********') {
+            $updates['razorpay_key_secret'] = trim((string)$data['key_secret']);
+        }
+    } elseif ($type === 'google_maps') {
+        if (isset($data['enabled']) && !is_truthy_setting($data['enabled'])) {
+            json_response(['error' => 'Google Maps enabled must be 0 or 1'], 422);
+        }
+        $updates = ['google_maps_enabled' => (string)($data['enabled'] ?? '1')];
+        if (array_key_exists('api_key', $data) && trim((string)$data['api_key']) !== '' && trim((string)$data['api_key']) !== '********') {
+            $updates['google_maps_api_key'] = trim((string)$data['api_key']);
+        }
+    } else {
+        json_response(['error' => 'Unknown integration'], 404);
+    }
+    foreach ($updates as $key => $value) {
+        $stmt = $pdo->prepare('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)');
+        $stmt->execute([$key, $value]);
+    }
+    return admin_integration_settings();
+}
+
+function test_external_get(string $url, ?string $userPassword = null): array {
+    if (!function_exists('curl_init')) {
+        return ['ok' => false, 'status' => null, 'message' => 'PHP cURL extension is not enabled'];
+    }
+    $ch = curl_init($url);
+    $opts = [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPGET => true,
+        CURLOPT_TIMEOUT => 15,
+    ];
+    if ($userPassword !== null) {
+        $opts[CURLOPT_USERPWD] = $userPassword;
+    }
+    curl_setopt_array($ch, $opts);
+    $response = curl_exec($ch);
+    $curlError = curl_error($ch);
+    $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    $json = json_decode((string)$response, true);
+    if ($response === false || $curlError !== '') {
+        return ['ok' => false, 'status' => $status ?: null, 'message' => $curlError];
+    }
+    if ($status >= 400) {
+        $message = is_array($json)
+            ? ($json['error']['description'] ?? $json['error_message'] ?? $json['error']['reason'] ?? $json['status'] ?? 'External API rejected the configuration')
+            : 'External API rejected the configuration';
+        return ['ok' => false, 'status' => $status, 'message' => $message];
+    }
+    return ['ok' => true, 'status' => $status, 'message' => 'Configuration accepted'];
+}
+
 function theme(): array {
     $rows = db()->query('SELECT setting_key, setting_value FROM theme_settings')->fetchAll();
     return array_column($rows, 'setting_value', 'setting_key');
@@ -920,17 +1222,29 @@ function payable_amount(float $total, string $mode, string $orderType = 'deliver
     return ['pay_now' => $total, 'remaining' => 0.0, 'status' => 'Pending'];
 }
 
+function enforce_enabled_order_type(string $orderType): void {
+    $s = settings();
+    if ($orderType === 'delivery' && (string)($s['delivery_enabled'] ?? '1') !== '1') {
+        json_response(['error' => 'Delivery is currently unavailable'], 422);
+    }
+    if ($orderType === 'takeaway' && (string)($s['takeaway_enabled'] ?? '1') !== '1') {
+        json_response(['error' => 'Takeaway is currently unavailable'], 422);
+    }
+}
+
 function ensure_online_payment_configured(float $payNow): void {
-    if ($payNow > 0 && (!env('RAZORPAY_KEY_ID', '') || !env('RAZORPAY_KEY_SECRET', ''))) {
+    $razorpay = razorpay_config();
+    if ($payNow > 0 && !$razorpay['configured']) {
         json_response(['error' => 'Razorpay credentials are required for online payments'], 503);
     }
 }
 
 function razorpay_create_order(float $amount, string $receipt): ?array {
-    $key = env('RAZORPAY_KEY_ID', '');
-    $secret = env('RAZORPAY_KEY_SECRET', '');
+    $config = razorpay_config();
+    $key = $config['key_id'];
+    $secret = $config['key_secret'];
     if ($amount <= 0) return null;
-    if (!$key || !$secret) {
+    if (!$config['configured']) {
         json_response(['error' => 'Razorpay credentials are required for online payments'], 503);
     }
     $payload = json_encode(['amount' => (int)round($amount * 100), 'currency' => 'INR', 'receipt' => $receipt, 'payment_capture' => 1]);
@@ -958,9 +1272,10 @@ function razorpay_create_order(float $amount, string $receipt): ?array {
 }
 
 function razorpay_fetch_payment(string $paymentId): ?array {
-    $key = env('RAZORPAY_KEY_ID', '');
-    $secret = env('RAZORPAY_KEY_SECRET', '');
-    if (!$key || !$secret) return null;
+    $config = razorpay_config();
+    $key = $config['key_id'];
+    $secret = $config['key_secret'];
+    if (!$config['configured']) return null;
     $ch = curl_init('https://api.razorpay.com/v1/payments/' . rawurlencode($paymentId));
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -1160,6 +1475,7 @@ function upsert_setting_table(string $table, array $values): array {
     $allowed = $table === 'theme_settings' ? array_keys(theme()) : array_keys(settings());
     foreach ($values as $key => $value) {
         if (!in_array($key, $allowed, true)) continue;
+        if ($table === 'settings' && in_array($key, ['razorpay_key_id','razorpay_key_secret','google_maps_api_key'], true)) continue;
         if ($table === 'theme_settings') {
             validate_theme_value($key, (string)$value);
         } else {
@@ -1201,8 +1517,11 @@ function validate_setting_value(string $key, string $value): void {
     if ($key === 'partial_payment_type' && !in_array($value, ['percent', 'fixed'], true)) {
         json_response(['error' => 'Partial payment type must be percent or fixed'], 422);
     }
-    if (in_array($key, ['partial_payment_enabled','cod_enabled','full_payment_enabled','customer_login_required'], true) && !is_truthy_setting($value)) {
+    if (in_array($key, ['partial_payment_enabled','cod_enabled','full_payment_enabled','customer_login_required','accept_orders','force_close_orders','customer_theme_enabled','customer_dark_mode_enabled','online_ordering_enabled','delivery_enabled','takeaway_enabled','guest_checkout_enabled','customer_login_enabled','razorpay_enabled','google_maps_enabled'], true) && !is_truthy_setting($value)) {
         json_response(['error' => "$key must be 0 or 1"], 422);
+    }
+    if (in_array($key, ['customer_default_theme','admin_theme_mode'], true) && !in_array($value, ['light','dark','system'], true)) {
+        json_response(['error' => "$key must be light, dark or system"], 422);
     }
     if ($key === 'partial_payment_value' && (float)$value < 0) {
         json_response(['error' => 'Partial payment value cannot be negative'], 422);
@@ -1321,18 +1640,25 @@ if ($path === '/health/db') {
         db()->query('SELECT 1')->fetchColumn();
         json_response(['ok' => true, 'database' => 'connected']);
     } catch (Throwable $e) {
+        error_log('[The Pizza House] Database health check failed: ' . $e->getMessage());
+        error_log('[The Pizza House] Database config: env_loaded=' . (is_file(dirname(__DIR__) . '/.env') ? 'yes' : 'no')
+            . ' host=' . (env('DB_HOST', '') ?: 'missing')
+            . ' port=' . (env('DB_PORT', '') ?: 'missing')
+            . ' db=' . (env('DB_NAME', '') ?: 'missing')
+            . ' user=' . (env('DB_USER', '') ?: 'missing')
+            . ' pdo_mysql=' . (in_array('mysql', PDO::getAvailableDrivers(), true) ? 'yes' : 'no'));
         json_response(['ok' => false, 'database' => 'unavailable', 'detail' => getenv('APP_ENV') === 'local' ? $e->getMessage() : null], 503);
     }
 }
 
-if (str_starts_with($path, '/orders') || str_starts_with($path, '/account/orders') || str_starts_with($path, '/admin') || str_starts_with($path, '/delivery') || str_starts_with($path, '/auth') || str_starts_with($path, '/cart') || str_starts_with($path, '/payments') || $path === '/settings' || $path === '/promotions') {
+if (str_starts_with($path, '/orders') || str_starts_with($path, '/account/orders') || str_starts_with($path, '/admin') || str_starts_with($path, '/delivery') || str_starts_with($path, '/auth') || str_starts_with($path, '/cart') || str_starts_with($path, '/payments') || $path === '/settings' || $path === '/promotions' || $path === '/store/status') {
     ensure_order_management_schema();
 }
 if ($path === '/theme' && $method === 'GET') json_response(['theme' => theme()]);
+if ($path === '/store/status' && $method === 'GET') json_response(['store' => order_availability()]);
 if ($path === '/settings' && $method === 'GET') {
-    $s = settings();
-    unset($s['RAZORPAY_KEY_SECRET']);
-    json_response(['settings' => $s, 'razorpay_key_id' => env('RAZORPAY_KEY_ID', '')]);
+    $s = sanitized_settings(settings());
+    json_response(['settings' => $s, ...public_runtime_settings()]);
 }
 if ($path === '/promotions' && $method === 'GET') {
     $activeWindow = "is_active=1 AND (start_at IS NULL OR start_at <= NOW()) AND (end_at IS NULL OR end_at >= NOW())";
@@ -1343,6 +1669,9 @@ if ($path === '/promotions' && $method === 'GET') {
 }
 
 if ($path === '/auth/register' && $method === 'POST') {
+    if (!setting_enabled('customer_login_enabled', true)) {
+        json_response(['error' => 'Customer account login is currently disabled'], 403);
+    }
     require_fields($data, ['name', 'phone', 'email', 'password']);
     if (!filter_var($data['email'], FILTER_VALIDATE_EMAIL)) json_response(['error' => 'Invalid email'], 422);
     if (strlen((string)$data['password']) < 8) json_response(['error' => 'Password must be at least 8 characters'], 422);
@@ -1368,6 +1697,9 @@ if (($path === '/auth/login' || $path === '/auth/admin-login') && $method === 'P
     if ($path === '/auth/admin-login') {
         issue_admin_refresh_session($user);
         json_response(['token' => issue_token((int)$user['id'], '12 HOUR'), 'user' => ['id' => (int)$user['id'], 'name' => $user['name'], 'phone' => $user['phone'], 'email' => $user['email'], 'role' => $user['role']]]);
+    }
+    if (($user['role'] ?? '') === 'customer' && !setting_enabled('customer_login_enabled', true)) {
+        json_response(['error' => 'Customer account login is currently disabled'], 403);
     }
     json_response(['token' => issue_token((int)$user['id']), 'user' => ['id' => (int)$user['id'], 'name' => $user['name'], 'phone' => $user['phone'], 'email' => $user['email'], 'role' => $user['role']]]);
 }
@@ -1457,6 +1789,7 @@ if ($path === '/cart/validate' && $method === 'POST') {
     require_fields($data, ['items']);
     $orderType = $data['order_type'] ?? 'delivery';
     if (!in_array($orderType, ['delivery', 'takeaway'], true)) json_response(['error' => 'Invalid order type'], 422);
+    enforce_enabled_order_type($orderType);
     $lat = null;
     $lng = null;
     if ($orderType === 'delivery') {
@@ -1469,14 +1802,16 @@ if ($path === '/cart/validate' && $method === 'POST') {
 }
 
 if ($path === '/orders' && $method === 'POST') {
+    enforce_store_open_for_order();
     $authUser = current_user(false);
     $user = $authUser && ($authUser['role'] ?? '') === 'customer' ? $authUser : null;
-    if (!$user && setting_enabled('customer_login_required', false)) {
+    if (!$user && (setting_enabled('customer_login_required', false) || !setting_enabled('guest_checkout_enabled', true))) {
         json_response(['error' => 'Customer login is required before checkout'], 401);
     }
     require_fields($data, ['items', 'payment_mode']);
     $orderType = $data['order_type'] ?? 'delivery';
     if (!in_array($orderType, ['delivery', 'takeaway'], true)) json_response(['error' => 'Invalid order type'], 422);
+    enforce_enabled_order_type($orderType);
     $lat = null;
     $lng = null;
     $deliveryAddress = null;
@@ -1587,8 +1922,9 @@ if ($path === '/payments/verify' && $method === 'POST') {
     if (!$order) json_response(['error' => 'Order not found'], 404);
     if (!order_accessible_to_request($order, $data)) json_response(['error' => 'Order not found'], 404);
     if ($order['razorpay_payment_id']) json_response(['order' => public_order($order), 'duplicate' => true]);
-    $secret = env('RAZORPAY_KEY_SECRET', '');
-    if ($secret) {
+    $razorpay = razorpay_config();
+    $secret = $razorpay['key_secret'];
+    if ($razorpay['configured'] && $secret) {
         $expected = hash_hmac('sha256', $data['razorpay_order_id'] . '|' . $data['razorpay_payment_id'], $secret);
         if (!hash_equals($expected, $data['razorpay_signature'])) json_response(['error' => 'Invalid Razorpay signature'], 422);
     } else {
@@ -2016,8 +2352,45 @@ if (str_starts_with($path, '/admin')) {
         json_response(['ok' => true, 'order' => $fresh->fetch()]);
     }
     if ($path === '/admin/settings') {
-        if ($method === 'GET') json_response(['settings' => settings()]);
-        if ($method === 'PUT') json_response(['settings' => upsert_setting_table('settings', $data)]);
+        if ($method === 'GET') json_response(['settings' => sanitized_settings(settings())]);
+        if ($method === 'PUT') json_response(['settings' => sanitized_settings(upsert_setting_table('settings', $data))]);
+    }
+    if ($path === '/admin/settings/order-availability' && $method === 'GET') {
+        json_response(['availability' => order_availability(), 'schedule' => order_schedule_from_settings(settings())]);
+    }
+    if ($path === '/admin/settings/order-availability' && $method === 'PUT') {
+        $schedule = normalize_order_schedule(is_array($data['schedule'] ?? null) ? $data['schedule'] : $data);
+        db()->prepare('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)')
+            ->execute(['order_schedule', json_encode($schedule, JSON_UNESCAPED_SLASHES)]);
+        json_response(['availability' => order_availability(), 'schedule' => order_schedule_from_settings(settings())]);
+    }
+    if ($path === '/admin/settings/order-availability/master' && $method === 'PUT') {
+        $value = (string)($data['accept_orders'] ?? '');
+        if (!is_truthy_setting($value)) json_response(['error' => 'accept_orders must be 0 or 1'], 422);
+        db()->prepare('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)')
+            ->execute(['accept_orders', $value]);
+        json_response(['availability' => order_availability()]);
+    }
+    if ($path === '/admin/settings/integrations' && $method === 'GET') {
+        json_response(['integrations' => admin_integration_settings()]);
+    }
+    if ($path === '/admin/settings/integrations/razorpay' && $method === 'PUT') {
+        json_response(['integrations' => save_integration_settings('razorpay', $data)]);
+    }
+    if ($path === '/admin/settings/integrations/google-maps' && $method === 'PUT') {
+        json_response(['integrations' => save_integration_settings('google_maps', $data)]);
+    }
+    if ($path === '/admin/settings/integrations/razorpay/test' && $method === 'POST') {
+        $config = razorpay_config();
+        if (!$config['configured']) json_response(['error' => 'Razorpay credentials are not configured'], 422);
+        $result = test_external_get('https://api.razorpay.com/v1/orders?count=1', $config['key_id'] . ':' . $config['key_secret']);
+        json_response(['test' => $result]);
+    }
+    if ($path === '/admin/settings/integrations/google-maps/test' && $method === 'POST') {
+        $config = google_maps_config();
+        if (!$config['configured']) json_response(['error' => 'Google Maps API key is not configured'], 422);
+        $result = test_external_get('https://maps.googleapis.com/maps/api/geocode/json?latlng=0,0&key=' . rawurlencode($config['api_key']));
+        json_response(['test' => $result]);
     }
     if ($path === '/admin/theme') {
         if ($method === 'GET') json_response(['theme' => theme()]);

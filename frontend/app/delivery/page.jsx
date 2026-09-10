@@ -29,6 +29,9 @@ export default function DeliveryDashboardPage() {
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [tracking, setTracking] = useState(null);
+  const [mapsKey, setMapsKey] = useState('');
+  const [directionsLoading, setDirectionsLoading] = useState(false);
+  const [directionsError, setDirectionsError] = useState('');
   const [gpsState, setGpsState] = useState({
     permission: 'Checking',
     secureContext: true,
@@ -42,10 +45,13 @@ export default function DeliveryDashboardPage() {
   const markerRef = useRef(null);
 
   const activeOrder = useMemo(() => orders.find(order => order.id === activeOrderId) || orders.find(order => order.status === 'out_for_delivery') || orders[0], [orders, activeOrderId]);
-  const hasMapsKey = Boolean(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY);
+  const hasMapsKey = Boolean(mapsKey);
 
   useEffect(() => {
     api('/theme').then(t => applyTheme(t.theme)).catch(() => {});
+    api('/settings').then(data => setMapsKey(data.google_maps_api_key || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '')).catch(() => {
+      setMapsKey(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '');
+    });
     refreshGeoPermission();
     setGpsState(state => ({ ...state, secureContext: typeof window === 'undefined' ? true : window.isSecureContext }));
     if (token()) {
@@ -245,6 +251,66 @@ export default function DeliveryDashboardPage() {
     }
   }
 
+  function browserLocation() {
+    return new Promise((resolve, reject) => {
+      if (!navigator.geolocation) {
+        reject(new Error('GPS is not available in this browser.'));
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        pos => {
+          if (!isValidGpsPosition(pos)) {
+            reject(new Error('GPS returned an incomplete location. Please try again.'));
+            return;
+          }
+          resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        },
+        error => reject(new Error(gpsErrorMessage(error))),
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      );
+    });
+  }
+
+  async function getDirections(order) {
+    setDirectionsError('');
+    if (!order?.latitude || !order?.longitude) {
+      setDirectionsError('Customer delivery coordinates are not available for this order.');
+      return;
+    }
+    setDirectionsLoading(true);
+    try {
+      let origin = tracking ? { lat: Number(tracking.lat), lng: Number(tracking.lng) } : null;
+      if (!origin) {
+        try {
+          origin = await browserLocation();
+        } catch (gpsError) {
+          if (order.driver_latitude && order.driver_longitude) {
+            origin = { lat: Number(order.driver_latitude), lng: Number(order.driver_longitude) };
+          } else {
+            throw gpsError;
+          }
+        }
+      }
+      if (!Number.isFinite(origin.lat) || !Number.isFinite(origin.lng)) {
+        throw new Error('Rider location is unavailable. Enable live location and try again.');
+      }
+      const destination = { lat: Number(order.latitude), lng: Number(order.longitude) };
+      if (!Number.isFinite(destination.lat) || !Number.isFinite(destination.lng)) {
+        throw new Error('Customer delivery coordinates are invalid.');
+      }
+      const url = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(`${origin.lat},${origin.lng}`)}&destination=${encodeURIComponent(`${destination.lat},${destination.lng}`)}&travelmode=driving`;
+      if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '')) {
+        window.location.href = url;
+      } else {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+    } catch (err) {
+      setDirectionsError(err.message);
+    } finally {
+      setDirectionsLoading(false);
+    }
+  }
+
   function logout() {
     stopTracking();
     clearToken();
@@ -270,7 +336,7 @@ export default function DeliveryDashboardPage() {
 
   return (
     <main className="delivery-page">
-      {hasMapsKey ? <Script src={`https://maps.googleapis.com/maps/api/js?key=${process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}`} strategy="afterInteractive" /> : null}
+      {hasMapsKey ? <Script src={`https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(mapsKey)}`} strategy="afterInteractive" /> : null}
       <section className="container delivery-header">
         <div><span className="eyebrow">Delivery partner</span><h1>Assigned orders</h1></div>
         <button className="ghost" onClick={logout}><LogOut size={16} /> Logout</button>
@@ -290,9 +356,10 @@ export default function DeliveryDashboardPage() {
               </div>
               <div className="action-row">
                 {['ready', 'picked_up', 'out_for_delivery'].includes(order.status) ? <button className="gps-enable-button" onClick={event => { event.stopPropagation(); startDelivery(order); }}><Navigation size={16} /> 📍 Enable Live Location</button> : null}
-                {order.latitude && order.longitude ? <a className="button ghost" href={`https://www.google.com/maps/dir/?api=1&destination=${order.latitude},${order.longitude}`} target="_blank" rel="noreferrer" onClick={event => event.stopPropagation()}><MapPin size={16} /> Open Navigation</a> : null}
+                {order.latitude && order.longitude ? <button className="ghost" onClick={event => { event.stopPropagation(); getDirections(order); }} disabled={directionsLoading}><MapPin size={16} /> {directionsLoading ? 'Opening...' : 'Get Directions'}</button> : null}
                 {order.status === 'out_for_delivery' ? <button className="ghost" onClick={event => { event.stopPropagation(); markDelivered(order); }}><CheckCircle2 size={16} /> Mark Delivered</button> : null}
               </div>
+              {directionsError && activeOrder?.id === order.id ? <p className="notice error">{directionsError}</p> : null}
             </article>
           ))}
         </div>

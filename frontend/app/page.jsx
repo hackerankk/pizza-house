@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ChevronRight, Menu, Minus, Plus, Search, ShoppingBag, Trash2, UserRound, X } from 'lucide-react';
-import { api, applyTheme, inr, productImage, readCart, saveCart, token } from './lib';
+import { api, applyTheme, inr, productImage, readCart, saveCart, setThemeMode, storedThemeMode, token } from './lib';
 
 function destinationHref(item) {
   if (!item || item.destination_type === 'none') return '';
@@ -14,7 +14,7 @@ function destinationHref(item) {
   return '';
 }
 
-function Header({ theme, cartCount, viewer, onCartOpen }) {
+function Header({ theme, settings = {}, cartCount, viewer, onCartOpen, storeStatus, themeMode, onThemeMode }) {
   const [open, setOpen] = useState(false);
   const customer = viewer?.role === 'customer' ? viewer : null;
   const close = () => setOpen(false);
@@ -25,8 +25,7 @@ function Header({ theme, cartCount, viewer, onCartOpen }) {
     ['Track Order', customer ? '/account' : '/login?return_to=/account']
   ];
   if (customer) links.push(['My Account', '/account']);
-  if (!viewer) links.push(['Login', '/login']);
-  if (viewer?.role === 'admin') links.push(['Admin', '/admin']);
+  if (!viewer && (settings.customer_login_enabled || '1') === '1') links.push(['Login', '/login']);
   if (viewer?.role === 'delivery_boy') links.push(['Delivery', '/delivery']);
 
   useEffect(() => {
@@ -55,6 +54,12 @@ function Header({ theme, cartCount, viewer, onCartOpen }) {
             {links.map(([label, href]) => <Link key={label} href={href}>{label}</Link>)}
           </nav>
           <div className="header-actions">
+            {storeStatus ? <span className={storeStatus.is_open ? 'store-status-pill open' : 'store-status-pill closed'}>{storeStatus.is_open ? 'Open - Orders Available' : 'Closed - Orders Unavailable'}</span> : null}
+            {(settings.customer_theme_enabled || '1') === '1' ? <select className="theme-mode-select" aria-label="Theme mode" title="Theme mode" value={themeMode} onChange={e => onThemeMode(e.target.value)}>
+              <option value="light">Light</option>
+              {(settings.customer_dark_mode_enabled || '1') === '1' ? <option value="dark">Dark</option> : null}
+              <option value="system">System</option>
+            </select> : null}
             <button className="cart-pill desktop-cart-button" onClick={onCartOpen} aria-label={`${cartCount} items in cart`}><ShoppingBag size={18} /><span>{cartCount}</span></button>
             <button className="icon-button hamburger-button" onClick={() => setOpen(true)} aria-label="Open menu"><Menu size={20} /></button>
           </div>
@@ -73,6 +78,8 @@ function Header({ theme, cartCount, viewer, onCartOpen }) {
             </div>
             {customer ? <div className="drawer-customer"><UserRound size={18} /><span>{customer.name}</span></div> : null}
             <nav className="mobile-drawer-nav">
+              {storeStatus ? <span className={storeStatus.is_open ? 'store-status-pill open' : 'store-status-pill closed'}>{storeStatus.is_open ? 'Open - Orders Available' : 'Closed - Orders Unavailable'}</span> : null}
+              {(settings.customer_theme_enabled || '1') === '1' ? <label>Theme<select value={themeMode} onChange={e => onThemeMode(e.target.value)}><option value="light">Light</option>{(settings.customer_dark_mode_enabled || '1') === '1' ? <option value="dark">Dark</option> : null}<option value="system">System</option></select></label> : null}
               {links.map(([label, href]) => <Link key={label} href={href} onClick={close}>{label}</Link>)}
               <button className="nav-button" onClick={() => { close(); onCartOpen(); }}>Cart ({cartCount})</button>
             </nav>
@@ -392,18 +399,22 @@ export default function Home() {
   const [modalItem, setModalItem] = useState(null);
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
   const [viewer, setViewer] = useState(null);
+  const [storeStatus, setStoreStatus] = useState(null);
+  const [themeMode, setThemeModeState] = useState('system');
   const [promotions, setPromotions] = useState({ banners: [], marquee: [], popup: null });
 
   useEffect(() => {
+    setThemeModeState(storedThemeMode() || 'system');
     setCart(readCart());
     setCartReady(true);
     setCouponCode(localStorage.getItem('pizza_house_coupon') || '');
-    Promise.all([api('/theme'), api('/settings'), api('/menu'), api('/promotions')])
-      .then(([t, s, m, p]) => {
+    Promise.all([api('/theme'), api('/settings'), api('/menu'), api('/promotions'), api('/store/status')])
+      .then(([t, s, m, p, store]) => {
         const uniqueItems = Array.from(new Map((m.items || []).map(item => [String(item.id), item])).values());
         setTheme(t.theme || {});
-        applyTheme(t.theme || {});
+        applyTheme(t.theme || {}, s.settings?.customer_default_theme || 'system');
         setSettings(s.settings || {});
+        setStoreStatus(store.store || null);
         setCategories(m.categories || []);
         setItems(uniqueItems);
         setOptionGroups(m.option_groups || []);
@@ -416,6 +427,11 @@ export default function Home() {
       }).catch(() => {});
     }
   }, []);
+
+  function changeThemeMode(mode) {
+    setThemeModeState(mode);
+    setThemeMode(mode);
+  }
 
   useEffect(() => {
     if (cartReady) saveCart(cart);
@@ -536,7 +552,7 @@ export default function Home() {
 
   return (
     <div className="shell food-shell">
-      <Header theme={theme} cartCount={cartCount} viewer={viewer} onCartOpen={() => setCartDrawerOpen(true)} />
+      <Header theme={theme} settings={settings} cartCount={cartCount} viewer={viewer} onCartOpen={() => setCartDrawerOpen(true)} storeStatus={storeStatus} themeMode={themeMode} onThemeMode={changeThemeMode} />
       <main>
         <section className="food-hero">
           <div className="container food-hero-inner">
@@ -544,8 +560,9 @@ export default function Home() {
               <span className="eyebrow">Fresh pizza, sides and drinks</span>
               <h1>{settings.restaurant_name || 'The Pizza House'}</h1>
               <p>{settings.restaurant_address || 'Order favourites for delivery or takeaway.'}</p>
+              {storeStatus && !storeStatus.is_open ? <p className="notice warning">Ordering is currently closed. {storeStatus.next_opening ? `Next opening: ${storeStatus.next_opening.day} ${storeStatus.next_opening.open}-${storeStatus.next_opening.close}` : 'Please check back later.'}</p> : null}
             </div>
-            <a className="button" href="#menu">Start Order <ChevronRight size={18} /></a>
+            {(settings.online_ordering_enabled || '1') === '1' ? <a className="button" href="#menu">Start Order <ChevronRight size={18} /></a> : <span className="status-badge danger">Online ordering off</span>}
           </div>
         </section>
 

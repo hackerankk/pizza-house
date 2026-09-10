@@ -15,7 +15,7 @@ function PaymentFailureContent() {
   const [message, setMessage] = useState('');
 
   useEffect(() => {
-    api('/theme').then(t => applyTheme(t.theme)).catch(() => {});
+    Promise.all([api('/theme'), api('/settings')]).then(([themeData, settingsData]) => applyTheme(themeData.theme, settingsData.settings?.customer_default_theme || 'system')).catch(() => {});
     try {
       const saved = JSON.parse(sessionStorage.getItem('pizza_house_payment_failure') || 'null');
       if (saved && (!orderId || String(saved.order_id) === String(orderId))) setFailure(saved);

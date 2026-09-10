@@ -49,6 +49,7 @@ export async function api(path, options = {}) {
   if (!res.ok) {
     const err = new Error(data.error || 'Request failed');
     err.status = res.status;
+    err.data = data;
     throw err;
   }
   return data;
@@ -142,8 +143,40 @@ export async function adminLogout() {
   }
 }
 
-export function applyTheme(theme = {}) {
+export function storedThemeMode(storageKey = 'pizza_house_theme_mode') {
+  if (typeof window === 'undefined') return '';
+  return localStorage.getItem(storageKey) || '';
+}
+
+export function resolveThemeMode(mode = 'system') {
+  const value = ['light', 'dark', 'system'].includes(mode) ? mode : 'system';
+  if (value === 'system') {
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches) return 'dark';
+    return 'light';
+  }
+  return value;
+}
+
+export function setThemeMode(mode, storageKey = 'pizza_house_theme_mode') {
+  if (!['light', 'dark', 'system'].includes(mode)) return;
+  if (typeof window !== 'undefined') localStorage.setItem(storageKey, mode);
+  applyTheme({}, mode, storageKey);
+}
+
+export function applyTheme(theme = {}, defaultMode = 'system', storageKey = 'pizza_house_theme_mode') {
   if (typeof document === 'undefined') return;
+  const explicitMode = storedThemeMode(storageKey);
+  const mode = explicitMode || defaultMode || 'system';
+  document.documentElement.dataset.themeMode = mode;
+  document.documentElement.dataset.colorScheme = resolveThemeMode(mode);
+  if (typeof window !== 'undefined' && window.matchMedia && !window.__pizzaHouseThemeListenerAttached) {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    media.addEventListener?.('change', () => {
+      const currentMode = document.documentElement.dataset.themeMode || 'system';
+      if (currentMode === 'system') document.documentElement.dataset.colorScheme = resolveThemeMode('system');
+    });
+    window.__pizzaHouseThemeListenerAttached = true;
+  }
   const map = {
     background_color: '--background-color',
     primary_color: '--primary-color',

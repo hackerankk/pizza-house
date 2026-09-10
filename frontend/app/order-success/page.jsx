@@ -20,7 +20,7 @@ function OrderSuccessContent() {
   const [message, setMessage] = useState('');
 
   useEffect(() => {
-    api('/theme').then(t => applyTheme(t.theme)).catch(() => {});
+    Promise.all([api('/theme'), api('/settings')]).then(([themeData, settingsData]) => applyTheme(themeData.theme, settingsData.settings?.customer_default_theme || 'system')).catch(() => {});
     if (!orderId) {
       setMessage('Missing order reference.');
       return;

@@ -11,9 +11,20 @@ export const metadata = {
 };
 
 export default function RootLayout({ children }) {
+  const themeScript = `
+    try {
+      var mode = localStorage.getItem('pizza_house_theme_mode') || 'system';
+      var resolved = mode === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : mode === 'dark' ? 'dark' : 'light';
+      document.documentElement.dataset.themeMode = mode;
+      document.documentElement.dataset.colorScheme = resolved;
+    } catch (e) {}
+  `;
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+        {children}
+      </body>
     </html>
   );
 }

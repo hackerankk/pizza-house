@@ -45,6 +45,7 @@ function OrderTrackingContent() {
   const [driverLocation, setDriverLocation] = useState(null);
   const [routeInfo, setRouteInfo] = useState(null);
   const [mapLoaded, setMapLoaded] = useState(false);
+  const [mapsKey, setMapsKey] = useState('');
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
   const [viewer, setViewer] = useState(null);
@@ -53,11 +54,16 @@ function OrderTrackingContent() {
   const directionsRef = useRef(null);
   const lastRouteRef = useRef({ time: 0, lat: null, lng: null });
 
-  const hasMapsKey = Boolean(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY);
+  const hasMapsKey = Boolean(mapsKey);
 
   useEffect(() => {
-    api('/theme').then(t => applyTheme(t.theme)).catch(() => {});
-    api('/settings').then(data => setSettings(data.settings || {})).catch(() => {});
+    Promise.all([api('/theme'), api('/settings')]).then(([themeData, data]) => {
+      applyTheme(themeData.theme, data.settings?.customer_default_theme || 'system');
+      setSettings(data.settings || {});
+      setMapsKey(data.google_maps_api_key || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '');
+    }).catch(() => {
+      setMapsKey(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '');
+    });
     api('/auth/me').then(data => setViewer(data.user || null)).catch(() => {});
   }, []);
 
@@ -156,7 +162,7 @@ function OrderTrackingContent() {
 
   return (
     <main className="tracking-page">
-      {hasMapsKey ? <Script src={`https://maps.googleapis.com/maps/api/js?key=${process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}`} strategy="afterInteractive" onLoad={() => setMapLoaded(true)} /> : null}
+      {hasMapsKey ? <Script src={`https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(mapsKey)}`} strategy="afterInteractive" onLoad={() => setMapLoaded(true)} /> : null}
       <div className="container account-hero">
         <div>
           <span className="eyebrow">Live tracking</span>
