@@ -47,7 +47,14 @@ export async function api(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers, cache: 'no-store', credentials: 'include' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.error || 'Request failed');
+    let message = data.error || 'Request failed';
+    if (res.status === 401) message = data.error || 'Your session has expired. Please login again.';
+    if (res.status === 403) {
+      message = data.error && data.error !== 'Forbidden'
+        ? data.error
+        : 'You do not have permission to perform this action. Please login with an administrator account.';
+    }
+    const err = new Error(message);
     err.status = res.status;
     err.data = data;
     throw err;

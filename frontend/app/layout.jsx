@@ -21,7 +21,7 @@ export default function RootLayout({ children }) {
   `;
   return (
     <html lang="en">
-      <body>
+      <body className="min-h-screen overflow-x-hidden bg-tph-bg font-tph text-tph-text antialiased">
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
         {children}
       </body>

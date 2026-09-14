@@ -41,6 +41,7 @@ export default function DeliveryDashboardPage() {
   });
   const watchRef = useRef(null);
   const lastSentRef = useRef(null);
+  const permissionStatusRef = useRef(null);
   const mapRef = useRef(null);
   const markerRef = useRef(null);
 
@@ -60,7 +61,11 @@ export default function DeliveryDashboardPage() {
         else setMessage('Please sign in with a delivery boy account.');
       }).catch(() => clearToken());
     }
-    return stopTracking;
+    return () => {
+      stopTracking();
+      if (permissionStatusRef.current) permissionStatusRef.current.onchange = null;
+      permissionStatusRef.current = null;
+    };
   }, []);
 
   async function refreshGeoPermission() {
@@ -71,6 +76,8 @@ export default function DeliveryDashboardPage() {
     try {
       const result = await navigator.permissions.query({ name: 'geolocation' });
       const update = () => setGpsState(state => ({ ...state, permission: statusLabel(result.state) }));
+      if (permissionStatusRef.current) permissionStatusRef.current.onchange = null;
+      permissionStatusRef.current = result;
       update();
       result.onchange = update;
     } catch {
@@ -144,7 +151,6 @@ export default function DeliveryDashboardPage() {
   }
 
   async function startDelivery(order) {
-    console.log('GPS REQUEST STARTED');
     if (!navigator.geolocation) {
       setMessage('GPS is not available in this browser.');
       return;
@@ -160,11 +166,6 @@ export default function DeliveryDashboardPage() {
       stopTracking(false);
       navigator.geolocation.getCurrentPosition(
         async pos => {
-          console.log('GPS SUCCESS', {
-            latitude: pos.coords.latitude,
-            longitude: pos.coords.longitude,
-            accuracy: pos.coords.accuracy
-          });
           if (!isValidGpsPosition(pos)) {
             setGpsState(state => ({ ...state, active: false, error: 'GPS returned an incomplete location. Please try again.' }));
             return;
@@ -177,11 +178,6 @@ export default function DeliveryDashboardPage() {
             setGpsState(state => ({ ...state, active: true, error: '' }));
             watchRef.current = navigator.geolocation.watchPosition(
               update => {
-                console.log('GPS UPDATE', {
-                  latitude: update.coords.latitude,
-                  longitude: update.coords.longitude,
-                  accuracy: update.coords.accuracy
-                });
                 if (!isValidGpsPosition(update)) {
                   setGpsState(state => ({ ...state, error: 'GPS update did not include valid coordinates.' }));
                   return;
@@ -189,7 +185,6 @@ export default function DeliveryDashboardPage() {
                 sendLocation(order.id, update);
               },
               error => {
-                console.log('GPS ERROR', error);
                 setGpsState(state => ({ ...state, active: false, error: gpsErrorMessage(error) }));
               },
               { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
@@ -201,7 +196,6 @@ export default function DeliveryDashboardPage() {
           }
         },
         error => {
-          console.log('GPS ERROR', error);
           setGpsState(state => ({ ...state, active: false, error: gpsErrorMessage(error) }));
         },
         { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }

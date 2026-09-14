@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
   phone VARCHAR(30) NOT NULL,
   email VARCHAR(180) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
-  role ENUM('customer','admin','delivery_boy') NOT NULL DEFAULT 'customer',
+  role ENUM('customer','admin','delivery_boy','staff') NOT NULL DEFAULT 'customer',
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -159,8 +159,18 @@ CREATE TABLE IF NOT EXISTS coupon_redemptions (
 CREATE TABLE IF NOT EXISTS offers (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(140) NOT NULL,
+  offer_type ENUM('bogo','fixed','percent') NOT NULL DEFAULT 'bogo',
+  discount_value DECIMAL(10,2) NOT NULL DEFAULT 0,
   scope ENUM('item','category') NOT NULL,
   scope_id BIGINT UNSIGNED NOT NULL,
+  buy_product_id BIGINT UNSIGNED NULL,
+  free_product_id BIGINT UNSIGNED NULL,
+  category_ids TEXT NULL,
+  product_ids TEXT NULL,
+  weekdays TEXT NULL,
+  size_rules TEXT NULL,
+  start_time TIME NULL,
+  end_time TIME NULL,
   buy_qty INT NOT NULL,
   get_qty INT NOT NULL,
   starts_at DATETIME NULL,
@@ -173,14 +183,19 @@ CREATE TABLE IF NOT EXISTS offers (
 
 CREATE TABLE IF NOT EXISTS delivery_slabs (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  min_order_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
   min_km DECIMAL(8,2) NOT NULL,
   max_km DECIMAL(8,2) NOT NULL,
+  free_delivery_distance_km DECIMAL(8,2) NULL,
+  free_delivery_enabled TINYINT(1) NOT NULL DEFAULT 0,
   charge DECIMAL(10,2) NOT NULL,
+  priority INT NOT NULL DEFAULT 100,
+  order_types VARCHAR(80) NOT NULL DEFAULT 'delivery',
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_delivery_slabs_active_range (is_active, min_km, max_km),
-  UNIQUE KEY delivery_range_unique (min_km, max_km)
+  INDEX idx_delivery_slabs_free_rules (is_active, free_delivery_enabled, min_order_amount, free_delivery_distance_km, priority)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS promotional_banners (
@@ -251,13 +266,17 @@ CREATE TABLE IF NOT EXISTS orders (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   order_number VARCHAR(40) NOT NULL UNIQUE,
   user_id BIGINT UNSIGNED NULL,
+  staff_id BIGINT UNSIGNED NULL,
+  source ENUM('customer_online','staff_offline') NOT NULL DEFAULT 'customer_online',
   guest_name VARCHAR(120) NULL,
   guest_phone VARCHAR(30) NULL,
   guest_email VARCHAR(180) NULL,
-  order_type ENUM('delivery','takeaway') NOT NULL DEFAULT 'delivery',
+  order_type ENUM('delivery','takeaway','dine_in') NOT NULL DEFAULT 'delivery',
   status ENUM('received','accepted','preparing','ready','picked_up','out_for_delivery','delivered','cancelled') NOT NULL DEFAULT 'received',
   subtotal DECIMAL(10,2) NOT NULL,
   discount_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+  discount_type VARCHAR(40) NULL,
+  discount_description VARCHAR(255) NULL,
   delivery_charge DECIMAL(10,2) NOT NULL DEFAULT 0,
   total_amount DECIMAL(10,2) NOT NULL,
   coupon_id BIGINT UNSIGNED NULL,
@@ -266,10 +285,18 @@ CREATE TABLE IF NOT EXISTS orders (
   latitude DECIMAL(10,7) NULL,
   longitude DECIMAL(10,7) NULL,
   distance_km DECIMAL(8,2) NULL,
-  payment_mode ENUM('full','partial','cod') NOT NULL,
+  payment_mode ENUM('full','partial','cod','cash') NOT NULL,
+  payment_method ENUM('razorpay','cash','cod','online','split') NULL,
+  cash_received DECIMAL(10,2) NULL,
+  online_received DECIMAL(10,2) NULL,
+  cash_change DECIMAL(10,2) NULL,
+  change_amount DECIMAL(10,2) NULL,
+  total_received DECIMAL(10,2) NULL,
+  table_number VARCHAR(40) NULL,
   payment_status ENUM('Pending','Partially Paid','Paid','Failed','Refunded','COD') NOT NULL DEFAULT 'Pending',
   paid_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
   remaining_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+  paid_at DATETIME NULL,
   razorpay_order_id VARCHAR(120) NULL UNIQUE,
   razorpay_payment_id VARCHAR(120) NULL UNIQUE,
   idempotency_key VARCHAR(120) NOT NULL UNIQUE,
@@ -283,11 +310,16 @@ CREATE TABLE IF NOT EXISTS orders (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_orders_guest_token (guest_access_token_hash),
+  INDEX idx_orders_source_created (source, created_at),
+  INDEX idx_orders_staff_created (staff_id, created_at),
+  INDEX idx_orders_created_source_payment (created_at, source, payment_method),
+  INDEX idx_orders_created_type_status (created_at, order_type, status),
   INDEX idx_orders_user_created (user_id, created_at),
   INDEX idx_orders_status_created (status, created_at),
   INDEX idx_orders_payment_status (payment_status),
   INDEX idx_orders_delivery_boy_status (delivery_boy_id, status),
   FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (staff_id) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (delivery_boy_id) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (coupon_id) REFERENCES coupons(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -415,6 +447,7 @@ INSERT INTO settings (setting_key, setting_value) VALUES
 ('google_maps_enabled','1'),
 ('accept_orders','1'),
 ('force_close_orders','0'),
+('order_manual_override','auto'),
 ('customer_theme_enabled','1'),
 ('customer_dark_mode_enabled','1'),
 ('online_ordering_enabled','1'),
@@ -466,11 +499,15 @@ INSERT INTO menu_items (category_id, name, slug, description, price, stock, imag
 ((SELECT id FROM categories WHERE slug='sides'),'Garlic Bread','garlic-bread','Toasted garlic bread with herbs',149,30,'')
 ON DUPLICATE KEY UPDATE name = name;
 
-INSERT INTO delivery_slabs (min_km, max_km, charge) VALUES
-(0,3,30),
-(3.01,6,50),
-(6.01,10,80)
-ON DUPLICATE KEY UPDATE charge = charge;
+INSERT INTO delivery_slabs (min_order_amount, min_km, max_km, free_delivery_distance_km, free_delivery_enabled, charge, priority, order_types, is_active)
+SELECT 0,0,3,3,0,30,100,'delivery',1
+WHERE NOT EXISTS (SELECT 1 FROM delivery_slabs WHERE min_km=0 AND max_km=3 AND free_delivery_enabled=0)
+UNION ALL
+SELECT 0,3.01,6,6,0,50,110,'delivery',1
+WHERE NOT EXISTS (SELECT 1 FROM delivery_slabs WHERE min_km=3.01 AND max_km=6 AND free_delivery_enabled=0)
+UNION ALL
+SELECT 0,6.01,10,10,0,80,120,'delivery',1
+WHERE NOT EXISTS (SELECT 1 FROM delivery_slabs WHERE min_km=6.01 AND max_km=10 AND free_delivery_enabled=0);
 
 -- Actual restaurant menu seed from backend/scripts/seed_actual_menu.php
 START TRANSACTION;

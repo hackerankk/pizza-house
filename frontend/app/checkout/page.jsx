@@ -7,6 +7,57 @@ import Script from 'next/script';
 import { Bike, CheckCircle2, CreditCard, Home, Loader2, LogIn, MapPin, Minus, Plus, ShoppingBag, Store, Trash2, UserRound } from 'lucide-react';
 import { api, applyTheme, guestOrderToken, inr, orderAccessQuery, productImage, readCart, rememberGuestOrder, saveCart, storedThemeMode, setThemeMode, token } from '../lib';
 
+function cartLineKey(line = {}) {
+  return String(line.key || line.id || '');
+}
+
+function bogoGroupKey(line = {}) {
+  return String(line.bogoGroupId || line.bogo_group_id || line.bogo_parent_key || line.bogoParentKey || (line.is_bogo_free ? '' : `bogo:${cartLineKey(line)}`));
+}
+
+function ensurePaidBogoGroup(line = {}) {
+  if (line.is_bogo_free) return line;
+  const groupId = bogoGroupKey(line);
+  return { ...line, bogoGroupId: groupId, bogo_group_id: groupId, bogoRole: 'paid', bogo_role: 'paid' };
+}
+
+function ensureFreeBogoGroup(line = {}, parentGroupId) {
+  const groupId = String(parentGroupId || bogoGroupKey(line));
+  return { ...line, bogoGroupId: groupId, bogo_group_id: groupId, bogoRole: 'free', bogo_role: 'free', bogo_parent_key: groupId };
+}
+
+function reconcileBogoCart(lines = []) {
+  const normalized = lines.map(line => line.is_bogo_free ? { ...line } : ensurePaidBogoGroup(line));
+  const paidByGroup = new Map();
+  const paidKeyToGroup = new Map();
+  normalized.forEach(line => {
+    if (line.is_bogo_free) return;
+    const groupId = bogoGroupKey(line);
+    paidByGroup.set(groupId, line);
+    paidKeyToGroup.set(cartLineKey(line), groupId);
+  });
+
+  const usedFreeQty = new Map();
+  const reconciled = [];
+  normalized.forEach(line => {
+    if (!line.is_bogo_free) {
+      reconciled.push(line);
+      return;
+    }
+    const requestedParent = bogoGroupKey(line);
+    const groupId = paidByGroup.has(requestedParent) ? requestedParent : paidKeyToGroup.get(requestedParent);
+    const paidLine = groupId ? paidByGroup.get(groupId) : null;
+    if (!paidLine) return;
+    const alreadyUsed = usedFreeQty.get(groupId) || 0;
+    const remaining = Math.max(Number(paidLine.quantity || 0) - alreadyUsed, 0);
+    if (remaining <= 0) return;
+    const quantity = Math.min(Number(line.quantity || 1), remaining);
+    usedFreeQty.set(groupId, alreadyUsed + quantity);
+    reconciled.push(ensureFreeBogoGroup({ ...line, quantity }, groupId));
+  });
+  return reconciled;
+}
+
 function CheckoutContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -42,7 +93,7 @@ function CheckoutContent() {
   const autocompleteInputRef = useRef(null);
 
   useEffect(() => {
-    setCart(readCart());
+    setCart(reconcileBogoCart(readCart()));
     setCartReady(true);
     setCouponCode(localStorage.getItem('pizza_house_coupon') || '');
     setThemeModeState(storedThemeMode() || 'system');
@@ -217,7 +268,7 @@ function CheckoutContent() {
     setThemeMode(mode);
   }
 
-  const subtotal = cart.reduce((sum, line) => sum + Number(line.price) * line.quantity, 0);
+  const subtotal = cart.filter(line => !line.is_bogo_free).reduce((sum, line) => sum + Number(line.price) * line.quantity, 0);
   const cartCount = cart.reduce((sum, line) => sum + line.quantity, 0);
   const total = Number(preview?.total ?? subtotal);
   const advance = useMemo(() => {
@@ -230,16 +281,33 @@ function CheckoutContent() {
   const remaining = Math.max(total - advance, 0);
 
   function cartPayload() {
-    return cart.map(item => ({
-      id: item.id,
-      variant_id: item.variant_id || null,
-      option_ids: item.option_ids || [],
-      quantity: item.quantity
-    }));
+    return reconcileBogoCart(cart).map(item => {
+      const groupId = bogoGroupKey(item);
+      return {
+        id: item.id,
+        variant_id: item.variant_id || null,
+        option_ids: item.option_ids || [],
+        quantity: item.quantity,
+        client_key: item.is_bogo_free ? (item.key || '') : groupId,
+        is_bogo_free: Boolean(item.is_bogo_free),
+        bogo_group_id: groupId,
+        bogo_parent_key: item.is_bogo_free ? groupId : ''
+      };
+    });
   }
 
   function qty(key, delta) {
-    setCart(current => current.map(line => (line.key || line.id) === key ? { ...line, quantity: line.quantity + delta } : line).filter(line => line.quantity > 0));
+    setCart(current => {
+      const target = current.find(line => (line.key || line.id) === key);
+      if (!target) return current;
+      const targetGroup = bogoGroupKey(target);
+      const next = !target.is_bogo_free && target.quantity + delta <= 0
+        ? current.filter(line => bogoGroupKey(line) !== targetGroup)
+        : current
+          .map(line => (line.key || line.id) === key ? { ...line, quantity: line.quantity + delta } : line)
+          .filter(line => line.quantity > 0);
+      return reconcileBogoCart(next);
+    });
   }
 
   function selectAddress(address) {
@@ -622,14 +690,17 @@ function CheckoutContent() {
           <div className="summary-header"><h2>Order summary</h2><span className="badge">{orderType === 'delivery' ? 'Delivery' : 'Takeaway'}</span></div>
           {!cart.length ? <div className="empty-state"><ShoppingBag size={26} /><strong>Your cart is empty</strong><Link href="/#menu">Back to menu</Link></div> : null}
           <div className="summary-items">
-            {cart.map((line, index) => <div className="summary-item" key={line.key || line.id}><img src={productImage(line, index)} alt={line.name} /><div><strong>{line.name}</strong>{line.variant_name ? <p>{line.variant_name}{line.options?.length ? ` | ${line.options.map(option => option.name).join(', ')}` : ''}</p> : null}<p>{inr(line.price)} x {line.quantity}</p><div className="quantity-control"><button onClick={() => qty(line.key || line.id, -1)}><Minus size={14} /></button><strong>{line.quantity}</strong><button onClick={() => qty(line.key || line.id, 1)}><Plus size={14} /></button></div></div><button className="icon-button" onClick={() => qty(line.key || line.id, -line.quantity)} aria-label={`Remove ${line.name}`}><Trash2 size={16} /></button></div>)}
+            {cart.map((line, index) => <div className={line.is_bogo_free ? 'summary-item free-cart-line' : 'summary-item'} key={line.key || line.id}><img src={productImage(line, index)} alt={line.name} /><div><strong>{line.name} {line.is_bogo_free ? <span className="bogo-free-badge">FREE</span> : null}</strong>{line.variant_name ? <p>{line.variant_name}{line.options?.length ? ` | ${line.options.map(option => option.name).join(', ')}` : ''}</p> : null}<p>{line.is_bogo_free ? `BOGO free item · original ${inr(line.price)} x ${line.quantity}` : `${inr(line.price)} x ${line.quantity}`}</p><div className="quantity-control"><button onClick={() => qty(line.key || line.id, -1)}><Minus size={14} /></button><strong>{line.quantity}</strong><button onClick={() => qty(line.key || line.id, 1)} disabled={line.is_bogo_free}><Plus size={14} /></button></div></div><button className="icon-button" onClick={() => qty(line.key || line.id, -line.quantity)} aria-label={`Remove ${line.name}`}><Trash2 size={16} /></button></div>)}
           </div>
           <div className="totals">
             <div><span>Subtotal</span><strong>{inr(preview?.subtotal ?? subtotal)}</strong></div>
-            <div><span>Coupon Discount</span><strong>-{inr(preview?.discount ?? 0)}</strong></div>
-            <div><span>BOGO / Free Items</span><strong>{preview?.lines?.reduce((sum, line) => sum + Number(line.free_quantity || 0), 0) || 0} free</strong></div>
-            {orderType === 'delivery' ? <div><span>Delivery Charge</span><strong>{inr(preview?.delivery?.delivery_charge ?? 0)}</strong></div> : null}
+            <div><span>Coupon Discount</span><strong>-{inr(preview?.coupon_discount ?? preview?.discount ?? 0)}</strong></div>
+            <div><span>BOGO Discount</span><strong>-{inr(preview?.bogo_discount ?? 0)}</strong></div>
+            {preview?.bogo_details?.length ? <div className="bogo-detail-row"><span>Free Items</span><strong>{preview.bogo_details.map(row => `${row.free_quantity} x ${row.item} ${row.size}`).join(', ')}</strong></div> : null}
+            {orderType === 'delivery' ? <div><span>Delivery Charge</span><strong>{preview?.delivery?.is_free_delivery ? 'FREE' : inr(preview?.delivery?.delivery_charge ?? 0)}</strong></div> : null}
             {orderType === 'delivery' && preview?.delivery ? <div><span>Distance</span><strong>{preview.delivery.distance_km} km</strong></div> : null}
+            {orderType === 'delivery' && preview?.delivery?.is_free_delivery ? <div className="notice success"><strong>FREE DELIVERY</strong><span>{preview.delivery.message}</span></div> : null}
+            {orderType === 'delivery' && preview?.delivery?.progress_message && !preview.delivery.is_free_delivery ? <div className="notice warning"><span>{preview.delivery.progress_message}</span></div> : null}
             <div className="grand"><span>Total</span><strong>{inr(total)}</strong></div>
             <div><span>Paid Now</span><strong>{inr(paymentMode === 'cod' ? 0 : advance)}</strong></div>
             <div><span>Remaining</span><strong>{inr(paymentMode === 'cod' ? total : remaining)}</strong></div>
