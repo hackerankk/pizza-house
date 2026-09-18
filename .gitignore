@@ -12,3 +12,5 @@ node_modules/
 dist/
 vendor/
 *.log
+backend/public/config.php
+public_html/config.php

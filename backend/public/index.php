@@ -11,11 +11,20 @@ set_exception_handler(function (Throwable $e): void {
 
 load_env(dirname(__DIR__) . '/.env');
 
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
-$allowed = env('FRONTEND_URL', '*');
-header('Access-Control-Allow-Origin: ' . ($allowed === '*' ? $origin : $allowed));
+define('PIZZA_BOOTSTRAP', true);
+$productionConfig = __DIR__ . '/config.php';
+define('PIZZA_CONFIG_LOADED', env('APP_ENV') !== 'local' && is_file($productionConfig));
+if (PIZZA_CONFIG_LOADED) {
+    require_once $productionConfig;
+}
+
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+$allowedOrigin = allowed_cors_origin($origin);
+if ($allowedOrigin !== '') {
+    header('Access-Control-Allow-Origin: ' . $allowedOrigin);
+    header('Access-Control-Allow-Credentials: true');
+}
 header('Vary: Origin');
-header('Access-Control-Allow-Credentials: true');
 header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Idempotency-Key, X-Guest-Order-Token');
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
@@ -63,6 +72,33 @@ function parse_env_value(string $value): string {
 function env(string $key, ?string $default = null): ?string {
     $value = getenv($key);
     return $value === false ? $default : $value;
+}
+
+function allowed_cors_origin(string $origin): string {
+    if ($origin === '') {
+        return '';
+    }
+    $configured = array_filter(array_map('trim', explode(',', (string)env('FRONTEND_URL', ''))));
+    $allowed = array_values(array_unique(array_merge($configured, [
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'https://thepizzahouse.online',
+        'https://www.thepizzahouse.online',
+        'https://api.thepizzahouse.online',
+    ])));
+    return in_array($origin, $allowed, true) ? $origin : '';
+}
+
+function safe_db_diagnostics(): array {
+    return [
+        'env_loaded' => is_file(dirname(__DIR__) . '/.env'),
+        'config_loaded' => defined('PIZZA_CONFIG_LOADED') && PIZZA_CONFIG_LOADED,
+        'pdo_mysql' => in_array('mysql', PDO::getAvailableDrivers(), true),
+        'host_configured' => env('DB_HOST', '') !== '',
+        'database_configured' => env('DB_NAME', '') !== '',
+        'user_configured' => env('DB_USER', '') !== '',
+        'password_configured' => env('DB_PASS', '') !== '',
+    ];
 }
 
 function db(): PDO {
@@ -2199,13 +2235,12 @@ if ($path === '/health/db') {
         json_response(['ok' => true, 'database' => 'connected']);
     } catch (Throwable $e) {
         error_log('[The Pizza House] Database health check failed: ' . $e->getMessage());
-        error_log('[The Pizza House] Database config: env_loaded=' . (is_file(dirname(__DIR__) . '/.env') ? 'yes' : 'no')
-            . ' host=' . (env('DB_HOST', '') ?: 'missing')
-            . ' port=' . (env('DB_PORT', '') ?: 'missing')
-            . ' db=' . (env('DB_NAME', '') ?: 'missing')
-            . ' user=' . (env('DB_USER', '') ?: 'missing')
-            . ' pdo_mysql=' . (in_array('mysql', PDO::getAvailableDrivers(), true) ? 'yes' : 'no'));
-        json_response(['ok' => false, 'database' => 'unavailable', 'detail' => getenv('APP_ENV') === 'local' ? $e->getMessage() : null], 503);
+        error_log('[The Pizza House] Database config diagnostics: ' . json_encode(safe_db_diagnostics()));
+        $payload = ['ok' => false, 'database' => 'unavailable', 'diagnostics' => safe_db_diagnostics()];
+        if (getenv('APP_ENV') === 'local') {
+            $payload['detail'] = $e->getMessage();
+        }
+        json_response($payload, 503);
     }
 }
 
