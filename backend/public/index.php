@@ -2106,6 +2106,32 @@ function order_accessible_to_request(array $order, array $data = []): bool {
         && (empty($order['guest_access_expires_at']) || strtotime((string)$order['guest_access_expires_at']) >= time());
 }
 
+function validated_size_prices(array $data): ?array {
+    if (!array_key_exists('size_prices', $data)) return null;
+    if (!is_array($data['size_prices'])) json_response(['error' => 'Size prices must be an object'], 422);
+    $prices = [];
+    foreach ($data['size_prices'] as $size => $price) {
+        if (!in_array($size, ['S', 'M', 'L'], true) || !is_numeric($price) || !is_finite((float)$price) || (float)$price <= 0 || (float)$price > 99999999.99) {
+            json_response(['error' => 'Each enabled size needs a valid positive price'], 422);
+        }
+        $prices[$size] = round((float)$price, 2);
+        if ($prices[$size] <= 0) json_response(['error' => 'Size prices must be at least 0.01'], 422);
+    }
+    return $prices;
+}
+
+function save_product_size_prices(int $productId, array $prices): void {
+    // Keep variant IDs and historical order references when a size is disabled.
+    db()->prepare("UPDATE menu_item_variants SET is_active=0, is_default=0 WHERE menu_item_id=? AND name IN ('S','M','L')")->execute([$productId]);
+    $stmt = db()->prepare('INSERT INTO menu_item_variants (menu_item_id,name,price,sort_order,is_default,is_active) VALUES (?,?,?,?,?,1) ON DUPLICATE KEY UPDATE price=VALUES(price),sort_order=VALUES(sort_order),is_default=VALUES(is_default),is_active=1');
+    $first = true;
+    foreach (['S', 'M', 'L'] as $index => $size) {
+        if (!array_key_exists($size, $prices)) continue;
+        $stmt->execute([$productId, $size, $prices[$size], $index, $first ? 1 : 0]);
+        $first = false;
+    }
+}
+
 function validate_admin_resource(string $name, array $payload): void {
     if ($name === 'products') {
         foreach (['price','stock','low_stock_threshold'] as $field) {
@@ -3071,10 +3097,22 @@ if (str_starts_with($path, '/admin')) {
         if ($path === '/admin/' . $name && $method === 'GET') {
             $pagination = pagination_params();
             $stmt = paginated_query('SELECT * FROM ' . $meta['table'] . ' ORDER BY id DESC LIMIT ? OFFSET ?', [], $pagination);
-            json_response(['items' => $stmt->fetchAll(), 'pagination' => $pagination]);
+            $rows = $stmt->fetchAll();
+            if ($name === 'products' && $rows) {
+                $ids = array_column($rows, 'id');
+                $variantsStmt = db()->prepare('SELECT * FROM menu_item_variants WHERE menu_item_id IN (' . implode(',', array_fill(0, count($ids), '?')) . ') ORDER BY sort_order,id');
+                $variantsStmt->execute($ids);
+                $byProduct = [];
+                foreach ($variantsStmt->fetchAll() as $variant) $byProduct[(int)$variant['menu_item_id']][] = $variant;
+                foreach ($rows as &$row) $row['variants'] = $byProduct[(int)$row['id']] ?? [];
+                unset($row);
+            }
+            json_response(['items' => $rows, 'pagination' => $pagination]);
         }
         if ($path === '/admin/' . $name && $method === 'POST') {
+            $sizePrices = $name === 'products' ? validated_size_prices($data) : null;
             $payload = array_intersect_key($data, array_flip($meta['fields']));
+            if ($sizePrices) $payload['price'] = min($sizePrices);
             if (isset($payload['name']) && empty($payload['slug']) && in_array('slug', $meta['fields'], true)) $payload['slug'] = slugify($payload['name']);
             if (isset($payload['code'])) $payload['code'] = strtoupper($payload['code']);
             if ($name === 'delivery-slabs') $payload = normalize_delivery_slab_payload($payload);
@@ -3084,12 +3122,24 @@ if (str_starts_with($path, '/admin')) {
             validate_admin_resource($name, $payload);
             $cols = array_keys($payload);
             $sql = 'INSERT INTO ' . $meta['table'] . ' (' . implode(',', $cols) . ') VALUES (' . implode(',', array_fill(0, count($cols), '?')) . ')';
-            db()->prepare($sql)->execute(array_values($payload));
-            json_response(['ok' => true, 'id' => db()->lastInsertId()], 201);
+            $pdo = db();
+            $pdo->beginTransaction();
+            try {
+                $pdo->prepare($sql)->execute(array_values($payload));
+                $createdId = (int)$pdo->lastInsertId();
+                if ($sizePrices !== null) save_product_size_prices($createdId, $sizePrices);
+                $pdo->commit();
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                throw $e;
+            }
+            json_response(['ok' => true, 'id' => $createdId], 201);
         }
         if (preg_match('#^/admin/' . preg_quote($name, '#') . '/(\d+)$#', $path, $m)) {
             if ($method === 'PUT') {
+                $sizePrices = $name === 'products' ? validated_size_prices($data) : null;
                 $payload = array_intersect_key($data, array_flip($meta['fields']));
+                if ($sizePrices) $payload['price'] = min($sizePrices);
                 if (isset($payload['name']) && empty($payload['slug']) && in_array('slug', $meta['fields'], true)) $payload['slug'] = slugify($payload['name']);
                 if (isset($payload['code'])) $payload['code'] = strtoupper($payload['code']);
                 if ($name === 'delivery-slabs') $payload = normalize_delivery_slab_payload($payload);
@@ -3103,7 +3153,16 @@ if (str_starts_with($path, '/admin')) {
                     $previousImage = $previousStmt->fetchColumn() ?: null;
                 }
                 $sets = implode(',', array_map(fn($c) => "$c=?", array_keys($payload)));
-                db()->prepare('UPDATE ' . $meta['table'] . " SET $sets WHERE id=?")->execute([...array_values($payload), (int)$m[1]]);
+                $pdo = db();
+                $pdo->beginTransaction();
+                try {
+                    $pdo->prepare('UPDATE ' . $meta['table'] . " SET $sets WHERE id=?")->execute([...array_values($payload), (int)$m[1]]);
+                    if ($sizePrices !== null) save_product_size_prices((int)$m[1], $sizePrices);
+                    $pdo->commit();
+                } catch (Throwable $e) {
+                    if ($pdo->inTransaction()) $pdo->rollBack();
+                    throw $e;
+                }
                 if (in_array($name, ['products', 'categories', 'promotional-banners', 'promotional-popups'], true) && array_key_exists('image_url', $payload) && $previousImage && $previousImage !== ($payload['image_url'] ?? '')) {
                     delete_local_upload($previousImage);
                 }

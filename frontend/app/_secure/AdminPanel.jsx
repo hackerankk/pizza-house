@@ -138,7 +138,7 @@ function adminLabel(field) {
 }
 
 function productStartingPrice(item) {
-  const variants = Array.isArray(item?.variants) ? item.variants : [];
+  const variants = Array.isArray(item?.variants) ? item.variants.filter(v => Number(v.is_active) !== 0) : [];
   if (variants.length) return Math.min(...variants.map(v => Number(v.price || item.price || 0)));
   return Number(item?.price || 0);
 }
@@ -774,6 +774,11 @@ export default function AdminPage() {
   function editResource(item) {
     const next = {};
     resourceFields.forEach(field => { next[field] = item[field] ?? ''; });
+    if (active === 'products') {
+      const sizes = (item.variants || []).filter(v => ['S', 'M', 'L'].includes(v.name) && Number(v.is_active) !== 0);
+      next.size_pricing_enabled = sizes.length > 0;
+      next.size_prices = Object.fromEntries(sizes.map(v => [v.name, v.price]));
+    }
     if (active === 'offers') {
       next.applies_to = item.scope === 'category' ? 'category' : 'product';
       next.category_id = item.scope === 'category' ? item.scope_id : '';
@@ -1200,6 +1205,18 @@ export default function AdminPage() {
 
   function normalizedResourcePayload() {
     const payload = { ...form };
+    if (active === 'products') {
+      if (payload.size_pricing_enabled) {
+        const prices = Object.values(payload.size_prices || {});
+        if (!prices.length || prices.some(price => !Number.isFinite(Number(price)) || Number(price) < 0.01 || Number(price) > 99999999.99)) {
+          throw new Error('Enable at least one size and enter a positive price for every enabled size.');
+        }
+        payload.price = Math.min(...prices.map(Number));
+      } else if (payload.size_prices !== undefined) {
+        payload.size_prices = {};
+      }
+      delete payload.size_pricing_enabled;
+    }
     if (active === 'offers') {
       const offerType = payload.offer_type || 'fixed';
       const appliesTo = payload.applies_to || 'order';
@@ -1372,6 +1389,25 @@ export default function AdminPage() {
                           ? null
                           : <label key={field}>{adminLabel(field)}{adminField(field, form[field], value => setForm({ ...form, [field]: value }))}</label>)}
               </div>
+              {active === 'products' ? (
+                <fieldset className="my-4 grid gap-3 rounded-lg border border-tph-border p-4">
+                  <legend className="px-2 font-bold">Size Pricing</legend>
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(form.size_pricing_enabled)} onChange={e => setForm({ ...form, size_pricing_enabled: e.target.checked, size_prices: form.size_prices || {} })} />Enable pizza size pricing</label>
+                  {form.size_pricing_enabled ? <div className="grid gap-3 sm:grid-cols-3">
+                    {[['S', 'Small'], ['M', 'Medium'], ['L', 'Large']].map(([size, label]) => {
+                      const enabled = Object.prototype.hasOwnProperty.call(form.size_prices || {}, size);
+                      return <div key={size} className="grid gap-2">
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={enabled} onChange={e => {
+                          const prices = { ...form.size_prices };
+                          if (e.target.checked) prices[size] = ''; else delete prices[size];
+                          setForm({ ...form, size_prices: prices });
+                        }} />{label}</label>
+                        <label>Price (INR)<input aria-label={`${label} price`} type="number" min="0.01" max="99999999.99" step="0.01" disabled={!enabled} value={form.size_prices?.[size] ?? ''} onChange={e => setForm({ ...form, size_prices: { ...form.size_prices, [size]: e.target.value } })} /></label>
+                      </div>;
+                    })}
+                  </div> : null}
+                </fieldset>
+              ) : null}
               {active === 'offers' && form.offer_type === 'bogo' ? (
                 <div className="offer-preview">
                   <strong>BOGO Preview</strong>

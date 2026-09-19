@@ -180,7 +180,7 @@ function CartPanel({ cart, subtotal, couponCode, onCoupon, onQty, onChooseFree, 
     return parts.join(' | ');
   }
   return (
-    <aside className={`${drawer ? 'cart-drawer-card' : 'order-summary menu-cart-card lg:!self-start'} !flex !min-h-0 !flex-col`} id="cart">
+    <aside className={`${drawer ? 'cart-drawer-card flex' : 'order-summary menu-cart-card lg:!self-start'} !min-h-0 !flex-col`} id={drawer ? 'cart-drawer' : 'cart'}>
       <div className="summary-header shrink-0 lg:!pb-2">
         <div>
           <span className="eyebrow">Your Cart</span>
@@ -434,7 +434,7 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
           <button className="icon-button" onClick={onClose} aria-label="Close options"><X size={18} /></button>
         </div>
 
-        {variants.length > 1 ? (
+        {variants.length > 0 ? (
           <section className="option-section">
             <h3>Choose Size</h3>
             <div className="choice-list">
@@ -494,7 +494,7 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
             <span>Total</span>
             <strong>{inr(unitPrice * quantity)}</strong>
           </div>
-          <button onClick={() => onAdd(line)} disabled={Number(item.stock) <= 0}><Plus size={16} /> Add to Cart</button>
+          <button className="customer-add-button" onClick={() => onAdd(line)} disabled={Number(item.stock) <= 0}><Plus size={16} /> Add to Cart</button>
         </div>
       </div>
     </div>
