@@ -128,6 +128,23 @@ function ensure_order_management_schema(): void {
     if (!in_array('is_active', $existingUserColumns, true)) {
         $pdo->exec('ALTER TABLE users ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER role');
     }
+    $pdo->exec("CREATE TABLE IF NOT EXISTS staff_permissions (
+        user_id BIGINT UNSIGNED NOT NULL,
+        permission_key VARCHAR(80) NOT NULL,
+        is_allowed TINYINT(1) NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, permission_key),
+        INDEX idx_staff_permissions_key (permission_key),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $defaultStaffPermissions = ['create_orders','view_current_orders','confirm_orders','mark_order_ready_complete','edit_orders','view_today_orders','view_reports'];
+    $staffUsers = $pdo->query("SELECT id FROM users WHERE role='staff'")->fetchAll();
+    $permissionSeed = $pdo->prepare('INSERT IGNORE INTO staff_permissions (user_id, permission_key, is_allowed) VALUES (?, ?, ?)');
+    foreach ($staffUsers as $staffUser) {
+        foreach ($defaultStaffPermissions as $permissionKey) {
+            $permissionSeed->execute([(int)$staffUser['id'], $permissionKey, in_array($permissionKey, ['edit_orders','view_reports'], true) ? 0 : 1]);
+        }
+    }
     $categoryColumns = $pdo->prepare('SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?');
     $categoryColumns->execute([$dbName, 'categories']);
     $existingCategoryColumns = array_column($categoryColumns->fetchAll(), 'COLUMN_NAME');
@@ -241,6 +258,7 @@ function ensure_order_management_schema(): void {
     }
     ensure_index('auth_tokens', 'idx_auth_tokens_user_expires', 'user_id, expires_at');
     ensure_index('users', 'idx_users_role_active', 'role, is_active');
+    ensure_index('staff_permissions', 'idx_staff_permissions_allowed', 'permission_key, is_allowed');
     ensure_index('categories', 'idx_categories_active_sort', 'is_active, sort_order, name');
     ensure_index('menu_items', 'idx_menu_items_active_category', 'is_active, category_id, name');
     ensure_index('menu_items', 'idx_menu_items_stock', 'stock');
@@ -507,6 +525,62 @@ function valid_next_statuses(string $current, string $orderType, string $source 
         $next[] = 'cancelled';
     }
     return array_values(array_unique($next));
+}
+
+function restaurant_timezone(): DateTimeZone {
+    return new DateTimeZone(env('RESTAURANT_TIMEZONE', 'Asia/Kolkata'));
+}
+
+function today_range(): array {
+    $today = new DateTimeImmutable('today', restaurant_timezone());
+    return [$today->format('Y-m-d 00:00:00'), $today->modify('+1 day')->format('Y-m-d 00:00:00'), $today->format('Y-m-d')];
+}
+
+function staff_permission_keys(): array {
+    return ['create_orders','view_current_orders','confirm_orders','mark_order_ready_complete','edit_orders','view_today_orders','view_reports'];
+}
+
+function default_staff_permissions(): array {
+    return [
+        'create_orders' => true,
+        'view_current_orders' => true,
+        'confirm_orders' => true,
+        'mark_order_ready_complete' => true,
+        'edit_orders' => false,
+        'view_today_orders' => true,
+        'view_reports' => false,
+    ];
+}
+
+function staff_permissions(int $staffId): array {
+    $defaults = default_staff_permissions();
+    $stmt = db()->prepare('SELECT permission_key, is_allowed FROM staff_permissions WHERE user_id=?');
+    $stmt->execute([$staffId]);
+    foreach ($stmt->fetchAll() as $row) {
+        if (array_key_exists($row['permission_key'], $defaults)) {
+            $defaults[$row['permission_key']] = (int)$row['is_allowed'] === 1;
+        }
+    }
+    return $defaults;
+}
+
+function save_staff_permissions(int $staffId, array $permissions): void {
+    $keys = staff_permission_keys();
+    $stmt = db()->prepare('INSERT INTO staff_permissions (user_id, permission_key, is_allowed) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE is_allowed=VALUES(is_allowed)');
+    foreach ($keys as $key) {
+        $value = array_key_exists($key, $permissions) ? (bool)$permissions[$key] : default_staff_permissions()[$key];
+        $stmt->execute([$staffId, $key, $value ? 1 : 0]);
+    }
+}
+
+function require_staff_permission(array $staff, string $permission): void {
+    if (($staff['role'] ?? '') === 'admin') {
+        return;
+    }
+    $permissions = staff_permissions((int)$staff['id']);
+    if (empty($permissions[$permission])) {
+        json_response(['error' => 'Staff permission required: ' . str_replace('_', ' ', $permission)], 403);
+    }
 }
 
 function order_is_admin_alertable(array $order): bool {
@@ -1695,12 +1769,12 @@ function calculate_cart(array $items, ?string $couponCode, ?int $userId, ?float 
     }
     $bogo = $applyAutomaticBogo ? explicit_bogo_discount($lines, $subtotal) : ['discount' => 0.0, 'details' => []];
     $coupon = active_coupon($couponCode, $subtotal, $userId);
+    $totalDiscount = money((float)$coupon['discount'] + (float)$bogo['discount']);
     $delivery = ['distance_km' => null, 'delivery_charge' => 0.0, 'slab' => null];
     if ($orderType === 'delivery') {
         if ($lat === null || $lng === null) json_response(['error' => 'Delivery coordinates are required'], 422);
         $delivery = delivery_quote($lat, $lng, money($subtotal - $totalDiscount), $orderType);
     }
-    $totalDiscount = money((float)$coupon['discount'] + (float)$bogo['discount']);
     $total = money($subtotal - $totalDiscount + $delivery['delivery_charge']);
     $minimum = (float)(settings()['minimum_order'] ?? 0);
     if ($subtotal < $minimum) {
@@ -1860,6 +1934,158 @@ function invoice_payload(array $order): array {
         'order' => public_order($order),
         'items' => array_map('public_order_item', $items->fetchAll()),
     ];
+}
+
+function editable_order_payload(array $order): array {
+    $payload = order_tracking_payload($order);
+    $payload['can_edit'] = !in_array($order['status'] ?? '', ['out_for_delivery', 'delivered', 'cancelled'], true);
+    return $payload;
+}
+
+function normalized_edit_items(array $items): array {
+    if (!$items) {
+        json_response(['error' => 'Order must contain at least one item'], 422);
+    }
+    return array_map(function (array $item): array {
+        $quantity = (int)($item['quantity'] ?? 0);
+        if ($quantity < 1) {
+            json_response(['error' => 'Quantity must be at least 1. Remove the item instead.'], 422);
+        }
+        return [
+            'id' => (int)($item['id'] ?? $item['menu_item_id'] ?? 0),
+            'variant_id' => isset($item['variant_id']) && $item['variant_id'] !== '' ? (int)$item['variant_id'] : null,
+            'option_ids' => array_values(array_unique(array_map('intval', is_array($item['option_ids'] ?? null) ? $item['option_ids'] : []))),
+            'quantity' => $quantity,
+            'client_key' => (string)($item['client_key'] ?? ''),
+            'is_bogo_free' => !empty($item['is_bogo_free']),
+            'bogo_parent_key' => (string)($item['bogo_parent_key'] ?? ''),
+        ];
+    }, $items);
+}
+
+function payment_state_after_order_edit(array $order, float $total): array {
+    $paymentMode = (string)($order['payment_mode'] ?? '');
+    $paymentMethod = (string)($order['payment_method'] ?? '');
+    $cashReceived = (float)($order['cash_received'] ?? 0);
+    $onlineReceived = (float)($order['online_received'] ?? 0);
+    $change = (float)($order['change_amount'] ?? $order['cash_change'] ?? 0);
+    $paid = (float)($order['paid_amount'] ?? 0);
+
+    if (($order['source'] ?? '') === 'staff_offline') {
+        $totalReceived = money($cashReceived + $onlineReceived);
+        $change = money(max($cashReceived - max($total - $onlineReceived, 0), 0));
+        $paid = money(min(max($totalReceived - $change, 0), $total));
+    }
+
+    if ($paymentMode === 'cod' || $paymentMethod === 'cod' || ($order['payment_status'] ?? '') === 'COD') {
+        return ['paid' => 0.0, 'remaining' => money($total), 'status' => 'COD', 'change' => $change];
+    }
+
+    $remaining = money(max($total - $paid, 0));
+    $status = $paid <= 0 ? 'Pending' : ($remaining <= 0 ? 'Paid' : 'Partially Paid');
+    return ['paid' => money(min($paid, $total)), 'remaining' => $remaining, 'status' => $status, 'change' => $change];
+}
+
+function apply_order_item_edit(array $order, array $items, int $actorId, string $actorLabel): array {
+    if (in_array($order['status'] ?? '', ['out_for_delivery', 'delivered', 'cancelled'], true)) {
+        json_response(['error' => 'Orders already out for delivery, delivered, or cancelled cannot be edited'], 422);
+    }
+    $items = normalized_edit_items($items);
+    $pdo = db();
+    $pdo->beginTransaction();
+    try {
+        $lock = $pdo->prepare('SELECT * FROM orders WHERE id=? FOR UPDATE');
+        $lock->execute([$order['id']]);
+        $lockedOrder = $lock->fetch();
+        if (!$lockedOrder) {
+            throw new ApiException('Order not found', 404);
+        }
+        if (($lockedOrder['updated_at'] ?? null) !== ($order['updated_at'] ?? null) && ($lockedOrder['status'] ?? '') !== ($order['status'] ?? '')) {
+            throw new ApiException('Order changed. Please refresh and retry.', 409);
+        }
+        if (in_array($lockedOrder['status'] ?? '', ['out_for_delivery', 'delivered', 'cancelled'], true)) {
+            throw new ApiException('Orders already out for delivery, delivered, or cancelled cannot be edited', 422);
+        }
+
+        $oldItemsStmt = $pdo->prepare('SELECT * FROM order_items WHERE order_id=? FOR UPDATE');
+        $oldItemsStmt->execute([$lockedOrder['id']]);
+        $oldItems = $oldItemsStmt->fetchAll();
+        foreach ($oldItems as $oldItem) {
+            $restoreQty = (int)$oldItem['quantity'] + (int)$oldItem['free_quantity'];
+            if ($restoreQty > 0) {
+                $pdo->prepare('UPDATE menu_items SET stock = stock + ? WHERE id=?')->execute([$restoreQty, $oldItem['menu_item_id']]);
+            }
+        }
+        $pdo->prepare('DELETE FROM coupon_redemptions WHERE order_id=?')->execute([$lockedOrder['id']]);
+
+        $couponCode = null;
+        if (!empty($lockedOrder['coupon_id'])) {
+            $couponStmt = $pdo->prepare('SELECT code FROM coupons WHERE id=? LIMIT 1');
+            $couponStmt->execute([$lockedOrder['coupon_id']]);
+            $couponCode = $couponStmt->fetchColumn() ?: null;
+        }
+        $lat = $lockedOrder['latitude'] !== null ? (float)$lockedOrder['latitude'] : null;
+        $lng = $lockedOrder['longitude'] !== null ? (float)$lockedOrder['longitude'] : null;
+        $calc = calculate_cart($items, $couponCode, $lockedOrder['user_id'] ? (int)$lockedOrder['user_id'] : null, $lat, $lng, (string)$lockedOrder['order_type']);
+        enforce_coupon_limit_locked($calc['coupon'], $lockedOrder['user_id'] ? (int)$lockedOrder['user_id'] : null);
+        $payment = payment_state_after_order_edit($lockedOrder, (float)$calc['total']);
+
+        $pdo->prepare('DELETE FROM order_items WHERE order_id=?')->execute([$lockedOrder['id']]);
+        $itemInsert = $pdo->prepare('INSERT INTO order_items (order_id, menu_item_id, variant_id, name_snapshot, variant_snapshot, options_snapshot, unit_price, quantity, free_quantity, line_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $stockStmt = $pdo->prepare('UPDATE menu_items SET stock = stock - ? WHERE id=? AND stock >= ?');
+        foreach ($calc['lines'] as $line) {
+            $item = $line['item'];
+            $qty = (int)$line['quantity'] + (int)$line['free_quantity'];
+            $stockStmt->execute([$qty, $item['id'], $qty]);
+            if ($stockStmt->rowCount() !== 1) {
+                throw new ApiException($item['name'] . ' stock changed while editing. Please retry.', 409);
+            }
+            $itemInsert->execute([
+                $lockedOrder['id'],
+                $item['id'],
+                $line['variant']['id'] ?? null,
+                $item['name'],
+                $line['variant']['name'] ?? null,
+                option_snapshot($line),
+                $line['unit_price'],
+                $line['quantity'],
+                $line['free_quantity'],
+                empty($line['is_bogo_free']) ? $line['line_total'] : 0,
+            ]);
+        }
+        if ($calc['coupon']) {
+            $pdo->prepare('INSERT INTO coupon_redemptions (coupon_id, user_id, order_id) VALUES (?, ?, ?)')->execute([$calc['coupon']['id'], $lockedOrder['user_id'] ?? null, $lockedOrder['id']]);
+        }
+
+        $pdo->prepare('UPDATE orders SET subtotal=?, discount_amount=?, discount_type=?, discount_description=?, delivery_charge=?, total_amount=?, coupon_id=?, distance_km=?, paid_amount=?, remaining_amount=?, payment_status=?, cash_change=?, change_amount=? WHERE id=?')
+            ->execute([
+                $calc['subtotal'],
+                $calc['discount'],
+                $calc['discount_type'],
+                $calc['discount_description'],
+                $calc['delivery']['delivery_charge'],
+                $calc['total'],
+                $calc['coupon']['id'] ?? null,
+                $calc['delivery']['distance_km'],
+                $payment['paid'],
+                $payment['remaining'],
+                $payment['status'],
+                $payment['change'],
+                $payment['change'],
+                $lockedOrder['id'],
+            ]);
+        $pdo->prepare('INSERT INTO order_status_history (order_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)')->execute([$lockedOrder['id'], $lockedOrder['status'], $lockedOrder['status'], $actorId]);
+        $pdo->commit();
+    } catch (ApiException $e) {
+        $pdo->rollBack();
+        json_response(['error' => $e->getMessage()], $e->status);
+    } catch (Throwable $e) {
+        $pdo->rollBack();
+        throw $e;
+    }
+
+    $fresh = order_with_customer((int)$order['id']);
+    return editable_order_payload($fresh);
 }
 
 function pdf_escape(string $value): string {
@@ -2348,12 +2574,20 @@ if (($path === '/auth/login' || $path === '/auth/admin-login' || $path === '/aut
     if (($user['role'] ?? '') === 'customer' && !setting_enabled('customer_login_enabled', true)) {
         json_response(['error' => 'Customer account login is currently disabled'], 403);
     }
-    json_response(['token' => issue_token((int)$user['id']), 'user' => ['id' => (int)$user['id'], 'name' => $user['name'], 'phone' => $user['phone'], 'email' => $user['email'], 'role' => $user['role']]]);
+    $payloadUser = ['id' => (int)$user['id'], 'name' => $user['name'], 'phone' => $user['phone'], 'email' => $user['email'], 'role' => $user['role']];
+    if (($user['role'] ?? '') === 'staff') {
+        $payloadUser['permissions'] = staff_permissions((int)$user['id']);
+    }
+    json_response(['token' => issue_token((int)$user['id']), 'user' => $payloadUser]);
 }
 
 if ($path === '/auth/me' && $method === 'GET') {
     $user = current_user();
-    json_response(['user' => ['id' => (int)$user['id'], 'name' => $user['name'], 'phone' => $user['phone'], 'email' => $user['email'], 'role' => $user['role']]]);
+    $payloadUser = ['id' => (int)$user['id'], 'name' => $user['name'], 'phone' => $user['phone'], 'email' => $user['email'], 'role' => $user['role']];
+    if (($user['role'] ?? '') === 'staff') {
+        $payloadUser['permissions'] = staff_permissions((int)$user['id']);
+    }
+    json_response(['user' => $payloadUser]);
 }
 
 if ($path === '/auth/logout' && $method === 'POST') {
@@ -2671,9 +2905,35 @@ if (preg_match('#^/orders/(\d+)/driver-location$#', $path, $m) && $method === 'G
 
 if ($path === '/staff/orders' && $method === 'GET') {
     $staff = current_user(true, 'staff');
-    $pagination = pagination_params();
-    $stmt = paginated_query('SELECT id, order_number, order_type, status, subtotal, discount_amount, discount_type, discount_description, delivery_charge, total_amount, payment_mode, payment_method, payment_status, paid_amount, remaining_amount, cash_received, online_received, total_received, cash_change, change_amount, table_number, created_at FROM orders WHERE staff_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?', [$staff['id']], $pagination);
-    json_response(['orders' => $stmt->fetchAll(), 'pagination' => $pagination]);
+    require_staff_permission($staff, 'view_current_orders');
+    $activeOnly = (string)($_GET['active'] ?? '1') === '1';
+    $where = 'staff_id=?';
+    $params = [$staff['id']];
+    if ($activeOnly) {
+        $where .= " AND status NOT IN ('delivered','cancelled')";
+    }
+    $pagination = pagination_params(30, 100);
+    $stmt = paginated_query("SELECT id, order_number, guest_name AS customer_name, guest_phone AS customer_phone, guest_email AS customer_email, order_type, status, subtotal, discount_amount, discount_type, discount_description, delivery_charge, total_amount, payment_mode, payment_method, payment_status, paid_amount, remaining_amount, cash_received, online_received, total_received, cash_change, change_amount, table_number, created_at FROM orders WHERE $where ORDER BY created_at DESC LIMIT ? OFFSET ?", $params, $pagination);
+    json_response(['orders' => $stmt->fetchAll(), 'pagination' => $pagination, 'permissions' => staff_permissions((int)$staff['id'])]);
+}
+
+if ($path === '/staff/dashboard' && $method === 'GET') {
+    $staff = current_user(true, 'staff');
+    $permissions = staff_permissions((int)$staff['id']);
+    [$todayStart, $tomorrowStart, $todayDate] = today_range();
+    $todayOrders = 0;
+    if (!empty($permissions['view_today_orders'])) {
+        $todayStmt = db()->prepare('SELECT COUNT(*) FROM orders WHERE staff_id=? AND created_at >= ? AND created_at < ?');
+        $todayStmt->execute([$staff['id'], $todayStart, $tomorrowStart]);
+        $todayOrders = (int)$todayStmt->fetchColumn();
+    }
+    $currentOrders = [];
+    if (!empty($permissions['view_current_orders'])) {
+        $currentStmt = db()->prepare("SELECT id, order_number, guest_name AS customer_name, guest_phone AS customer_phone, order_type, source, status, total_amount, payment_status, paid_amount, remaining_amount, payment_method, table_number, created_at FROM orders WHERE staff_id=? AND status NOT IN ('delivered','cancelled') ORDER BY created_at DESC LIMIT 30");
+        $currentStmt->execute([$staff['id']]);
+        $currentOrders = $currentStmt->fetchAll();
+    }
+    json_response(['today' => ['date' => $todayDate, 'orders' => $todayOrders], 'current_orders' => $currentOrders, 'permissions' => $permissions]);
 }
 
 if ($path === '/staff/offers' && $method === 'GET') {
@@ -2683,6 +2943,7 @@ if ($path === '/staff/offers' && $method === 'GET') {
 
 if ($path === '/staff/orders' && $method === 'POST') {
     $staff = current_user(true, 'staff');
+    require_staff_permission($staff, 'create_orders');
     require_fields($data, ['items', 'order_type', 'payment_method']);
     $orderType = (string)$data['order_type'];
     if (!in_array($orderType, ['dine_in', 'takeaway'], true)) json_response(['error' => 'Staff orders support dine-in or takeaway only'], 422);
@@ -2767,11 +3028,97 @@ if ($path === '/staff/orders' && $method === 'POST') {
     json_response(['order' => public_order($stmt->fetch())], 201);
 }
 
+if (preg_match('#^/staff/orders/(\d+)$#', $path, $m) && $method === 'PUT') {
+    $staff = current_user(true, 'staff');
+    $stmt = db()->prepare("SELECT * FROM orders WHERE id=? AND staff_id=? AND source='staff_offline' LIMIT 1");
+    $stmt->execute([(int)$m[1], $staff['id']]);
+    $order = $stmt->fetch();
+    if (!$order) json_response(['error' => 'Order not found'], 404);
+    $status = (string)($data['status'] ?? '');
+    if (!in_array($status, ['accepted','ready','delivered'], true)) json_response(['error' => 'Invalid staff order action'], 422);
+    if ($status === 'accepted') {
+        require_staff_permission($staff, 'confirm_orders');
+    } else {
+        require_staff_permission($staff, 'mark_order_ready_complete');
+    }
+    if (!in_array($status, valid_next_statuses($order['status'], $order['order_type'], $order['source']), true)) {
+        json_response(['error' => 'Invalid status transition from ' . status_label($order['status']) . ' to ' . status_label($status)], 422);
+    }
+    $acceptedAt = $order['accepted_at'];
+    if ($status === 'accepted' && !$acceptedAt) {
+        $acceptedAt = date('Y-m-d H:i:s');
+    }
+    $deliveredAtSql = $status === 'delivered' ? ', delivered_at=NOW()' : '';
+    $update = db()->prepare("UPDATE orders SET status=?, accepted_at=? $deliveredAtSql WHERE id=? AND status=?");
+    $update->execute([$status, $acceptedAt, $order['id'], $order['status']]);
+    if ($update->rowCount() !== 1) {
+        json_response(['error' => 'Order status changed. Please refresh and retry.'], 409);
+    }
+    db()->prepare('INSERT INTO order_status_history (order_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)')->execute([$order['id'], $order['status'], $status, $staff['id']]);
+    $fresh = db()->prepare('SELECT * FROM orders WHERE id=?');
+    $fresh->execute([$order['id']]);
+    json_response(['ok' => true, 'order' => public_order($fresh->fetch())]);
+}
+
+if (preg_match('#^/staff/orders/(\d+)/edit$#', $path, $m)) {
+    $staff = current_user(true, 'staff');
+    require_staff_permission($staff, 'edit_orders');
+    $order = order_with_customer((int)$m[1]);
+    if (!$order || (int)($order['staff_id'] ?? 0) !== (int)$staff['id'] || ($order['source'] ?? '') !== 'staff_offline') {
+        json_response(['error' => 'Order not found'], 404);
+    }
+    if ($method === 'GET') {
+        json_response(editable_order_payload($order));
+    }
+    if ($method === 'PUT') {
+        json_response(apply_order_item_edit($order, is_array($data['items'] ?? null) ? $data['items'] : [], (int)$staff['id'], 'staff'));
+    }
+}
+
 if (preg_match('#^/staff/orders/(\d+)/invoice$#', $path, $m) && $method === 'GET') {
     $staff = current_user(true, 'staff');
     $order = order_with_customer((int)$m[1]);
     if (!$order || (int)($order['staff_id'] ?? 0) !== (int)$staff['id']) json_response(['error' => 'Order not found'], 404);
     send_pdf_response($order);
+}
+
+if ($path === '/staff/reports/sales' && $method === 'GET') {
+    $staff = current_user(true, 'staff');
+    require_staff_permission($staff, 'view_reports');
+    $today = new DateTimeImmutable('today', restaurant_timezone());
+    $preset = (string)($_GET['preset'] ?? 'today');
+    $from = (string)($_GET['from'] ?? $today->format('Y-m-d'));
+    $to = (string)($_GET['to'] ?? $from);
+    if ($preset === 'today') $from = $to = $today->format('Y-m-d');
+    if ($preset === 'yesterday') $from = $to = $today->modify('-1 day')->format('Y-m-d');
+    if ($preset === 'this_week') { $from = $today->modify('monday this week')->format('Y-m-d'); $to = $today->format('Y-m-d'); }
+    if ($preset === 'this_month') { $from = $today->modify('first day of this month')->format('Y-m-d'); $to = $today->format('Y-m-d'); }
+    if (strtotime($from) === false || strtotime($to) === false) json_response(['error' => 'Invalid report date'], 422);
+    $params = [$staff['id'], $from . ' 00:00:00', (new DateTimeImmutable($to, restaurant_timezone()))->modify('+1 day')->format('Y-m-d 00:00:00')];
+    $where = 'o.staff_id=? AND o.created_at >= ? AND o.created_at < ?';
+    $summaryStmt = db()->prepare("SELECT COUNT(*) AS total_orders, COALESCE(SUM(o.total_amount),0) AS total_sales, COALESCE(SUM(o.paid_amount),0) AS paid_amount, COALESCE(SUM(o.remaining_amount),0) AS remaining_amount, COALESCE(SUM(GREATEST(COALESCE(o.cash_received,0)-COALESCE(o.change_amount,o.cash_change,0),0)),0) AS cash_sales, COALESCE(SUM(o.online_received),0) AS counter_digital_sales, COALESCE(AVG(o.total_amount),0) AS average_order FROM orders o WHERE $where");
+    $summaryStmt->execute($params);
+    $ordersStmt = db()->prepare("SELECT o.id, o.order_number, o.created_at, o.order_type, o.payment_method, o.payment_status, o.total_amount, o.paid_amount, o.remaining_amount, o.status FROM orders o WHERE $where ORDER BY o.created_at DESC");
+    $ordersStmt->execute($params);
+    $orders = $ordersStmt->fetchAll();
+    if (($_GET['format'] ?? '') === 'csv') {
+        header('Content-Type: text/csv');
+        header('Content-Disposition: attachment; filename="staff-sales-report-' . $from . '-to-' . $to . '.csv"');
+        $out = fopen('php://output', 'w');
+        fputcsv($out, ['Order ID','Date/Time','Order Type','Payment','Total','Paid','Remaining','Status']);
+        foreach ($orders as $row) fputcsv($out, [$row['order_number'], $row['created_at'], $row['order_type'], $row['payment_method'], $row['total_amount'], $row['paid_amount'], $row['remaining_amount'], $row['status']]);
+        exit;
+    }
+    if (($_GET['format'] ?? '') === 'pdf') {
+        $summary = $summaryStmt->fetch() ?: [];
+        $lines = ['The Pizza House - Staff Sales Report', 'Staff: ' . $staff['name'], 'Range: ' . $from . ' to ' . $to, 'Orders: ' . (int)($summary['total_orders'] ?? 0), 'Sales: INR ' . number_format((float)($summary['total_sales'] ?? 0), 2), 'Paid: INR ' . number_format((float)($summary['paid_amount'] ?? 0), 2), 'Remaining: INR ' . number_format((float)($summary['remaining_amount'] ?? 0), 2), '', 'Orders'];
+        foreach (array_slice($orders, 0, 80) as $row) $lines[] = $row['order_number'] . ' | ' . $row['created_at'] . ' | INR ' . number_format((float)$row['total_amount'], 2) . ' | ' . $row['status'];
+        header('Content-Type: application/pdf');
+        header('Content-Disposition: inline; filename="staff-sales-report-' . $from . '-to-' . $to . '.pdf"');
+        echo simple_pdf($lines);
+        exit;
+    }
+    json_response(['report' => ['range' => ['from' => $from, 'to' => $to], 'summary' => $summaryStmt->fetch() ?: [], 'orders' => $orders]]);
 }
 
 if ($path === '/account/orders' && $method === 'GET') {
@@ -2875,19 +3222,40 @@ if (str_starts_with($path, '/delivery')) {
 if (str_starts_with($path, '/admin')) {
     $admin = current_user(true, 'admin');
     if ($path === '/admin/reports/sales' && $method === 'GET') {
-        $today = new DateTimeImmutable('today', new DateTimeZone('Asia/Kolkata'));
+        $today = new DateTimeImmutable('today', restaurant_timezone());
         $preset = (string)($_GET['preset'] ?? 'today');
         $from = (string)($_GET['from'] ?? $today->format('Y-m-d'));
         $to = (string)($_GET['to'] ?? $from);
         if ($preset === 'yesterday') $from = $to = $today->modify('-1 day')->format('Y-m-d');
         if ($preset === 'today') $from = $to = $today->format('Y-m-d');
+        if ($preset === 'this_week') { $from = $today->modify('monday this week')->format('Y-m-d'); $to = $today->format('Y-m-d'); }
+        if ($preset === 'last_week') { $from = $today->modify('monday last week')->format('Y-m-d'); $to = $today->modify('sunday last week')->format('Y-m-d'); }
+        if ($preset === 'this_month') { $from = $today->modify('first day of this month')->format('Y-m-d'); $to = $today->format('Y-m-d'); }
+        if ($preset === 'last_month') { $from = $today->modify('first day of last month')->format('Y-m-d'); $to = $today->modify('last day of last month')->format('Y-m-d'); }
         $staffId = isset($_GET['staff_id']) && $_GET['staff_id'] !== '' ? (int)$_GET['staff_id'] : null;
+        $sourceFilter = trim((string)($_GET['source'] ?? ''));
+        $paymentFilter = trim((string)($_GET['payment_status'] ?? ''));
+        $statusFilter = trim((string)($_GET['status'] ?? ''));
         if (strtotime($from) === false || strtotime($to) === false) json_response(['error' => 'Invalid report date'], 422);
-        $params = [$from . ' 00:00:00', $to . ' 23:59:59'];
-        $where = 'o.created_at BETWEEN ? AND ?';
+        $params = [$from . ' 00:00:00', (new DateTimeImmutable($to, restaurant_timezone()))->modify('+1 day')->format('Y-m-d 00:00:00')];
+        $where = 'o.created_at >= ? AND o.created_at < ?';
         if ($staffId) {
             $where .= ' AND o.staff_id=?';
             $params[] = $staffId;
+        }
+        if ($sourceFilter !== '') {
+            if (!in_array($sourceFilter, ['customer_online','staff_offline'], true)) json_response(['error' => 'Invalid source filter'], 422);
+            $where .= ' AND o.source=?';
+            $params[] = $sourceFilter;
+        }
+        if ($paymentFilter !== '') {
+            $where .= ' AND o.payment_status=?';
+            $params[] = $paymentFilter;
+        }
+        if ($statusFilter !== '') {
+            if (!in_array($statusFilter, order_statuses(), true)) json_response(['error' => 'Invalid status filter'], 422);
+            $where .= ' AND o.status=?';
+            $params[] = $statusFilter;
         }
         $summaryStmt = db()->prepare("SELECT
             COUNT(*) AS total_orders,
@@ -2895,10 +3263,18 @@ if (str_starts_with($path, '/admin')) {
             COALESCE(SUM(o.subtotal),0) AS gross_sales,
             COALESCE(SUM(o.discount_amount),0) AS total_discounts,
             COALESCE(AVG(o.total_amount),0) AS average_order,
+            COALESCE(SUM(o.paid_amount),0) AS paid_amount,
+            COALESCE(SUM(o.remaining_amount),0) AS remaining_amount,
             COALESCE(SUM(CASE WHEN o.source='customer_online' THEN o.total_amount ELSE 0 END),0) AS online_sales,
             COALESCE(SUM(CASE WHEN o.source='staff_offline' THEN o.total_amount ELSE 0 END),0) AS offline_sales,
             COALESCE(SUM(GREATEST(COALESCE(o.cash_received,0)-COALESCE(o.change_amount,o.cash_change,0),0)),0) AS cash_sales,
             COALESCE(SUM(COALESCE(o.online_received,0)),0) AS counter_digital_sales,
+            COALESCE(SUM(CASE WHEN o.payment_status='Partially Paid' THEN 1 ELSE 0 END),0) AS partial_payment_orders,
+            COALESCE(SUM(CASE WHEN o.status='delivered' THEN 1 ELSE 0 END),0) AS completed_orders,
+            COALESCE(SUM(CASE WHEN o.status='cancelled' THEN 1 ELSE 0 END),0) AS cancelled_orders,
+            COALESCE(SUM(CASE WHEN o.status NOT IN ('delivered','cancelled') THEN 1 ELSE 0 END),0) AS pending_orders,
+            COALESCE(SUM(CASE WHEN o.coupon_id IS NOT NULL THEN 1 ELSE 0 END),0) AS coupon_orders,
+            COALESCE(SUM(CASE WHEN o.discount_type LIKE '%bogo%' THEN 1 ELSE 0 END),0) AS bogo_orders,
             COALESCE(SUM(CASE WHEN o.discount_type LIKE '%bogo%' THEN o.discount_amount ELSE 0 END),0) AS bogo_discount,
             COALESCE(SUM(CASE WHEN o.discount_type='fixed' THEN o.discount_amount ELSE 0 END),0) AS fixed_discount,
             COALESCE(SUM(CASE WHEN o.coupon_id IS NOT NULL THEN o.discount_amount ELSE 0 END),0) AS coupon_discount
@@ -2928,7 +3304,7 @@ if (str_starts_with($path, '/admin')) {
         $orders = $ordersStmt->fetchAll();
         $bogoStmt = db()->prepare("SELECT COALESCE(discount_description,'BOGO') AS offer, COUNT(*) AS orders, COALESCE(SUM(discount_amount),0) AS discount FROM orders o WHERE $where AND o.discount_type LIKE '%bogo%' GROUP BY offer ORDER BY discount DESC");
         $bogoStmt->execute($params);
-        $payload = ['range' => ['from' => $from, 'to' => $to], 'summary' => $summary, 'breakdown' => $breakdown, 'staff_sales' => $staffStmt->fetchAll(), 'orders' => $orders, 'bogo' => $bogoStmt->fetchAll()];
+        $payload = ['range' => ['from' => $from, 'to' => $to], 'filters' => ['staff_id' => $staffId, 'source' => $sourceFilter, 'payment_status' => $paymentFilter, 'status' => $statusFilter], 'summary' => $summary, 'breakdown' => $breakdown, 'staff_sales' => $staffStmt->fetchAll(), 'orders' => $orders, 'bogo' => $bogoStmt->fetchAll()];
         if (($_GET['format'] ?? '') === 'csv') {
             header('Content-Type: text/csv');
             header('Content-Disposition: attachment; filename="sales-report-' . $from . '-to-' . $to . '.csv"');
@@ -2937,22 +3313,60 @@ if (str_starts_with($path, '/admin')) {
             foreach ($orders as $row) fputcsv($out, [$row['order_number'], $row['created_at'], $row['source'], $row['staff_name'], $row['customer_name'], $row['order_type'], $row['payment_type'], $row['subtotal'], $row['discount_amount'], $row['total_amount'], $row['paid_amount'], $row['remaining_amount'], $row['status']]);
             exit;
         }
+        if (($_GET['format'] ?? '') === 'pdf') {
+            $lines = [
+                'The Pizza House - Sales Report',
+                'Range: ' . $from . ' to ' . $to,
+                'Filters: Source=' . ($sourceFilter ?: 'All') . ' | Status=' . ($statusFilter ?: 'All') . ' | Payment=' . ($paymentFilter ?: 'All'),
+                '',
+                'Summary',
+                'Orders: ' . (int)($summary['total_orders'] ?? 0),
+                'Total Sales: INR ' . number_format((float)($summary['total_sales'] ?? 0), 2),
+                'Paid Amount: INR ' . number_format((float)($summary['paid_amount'] ?? 0), 2),
+                'Remaining: INR ' . number_format((float)($summary['remaining_amount'] ?? 0), 2),
+                'Average Order: INR ' . number_format((float)($summary['average_order'] ?? 0), 2),
+                'Online Orders Sales: INR ' . number_format((float)($summary['online_sales'] ?? 0), 2),
+                'Staff/Offline Sales: INR ' . number_format((float)($summary['offline_sales'] ?? 0), 2),
+                'Cash Sales: INR ' . number_format((float)($summary['cash_sales'] ?? 0), 2),
+                'Counter Digital: INR ' . number_format((float)($summary['counter_digital_sales'] ?? 0), 2),
+                'Discounts: INR ' . number_format((float)($summary['total_discounts'] ?? 0), 2),
+                'Completed: ' . (int)($summary['completed_orders'] ?? 0) . ' | Pending: ' . (int)($summary['pending_orders'] ?? 0) . ' | Cancelled: ' . (int)($summary['cancelled_orders'] ?? 0),
+                '',
+                'Orders',
+            ];
+            foreach (array_slice($orders, 0, 80) as $row) {
+                $lines[] = $row['order_number'] . ' | ' . $row['created_at'] . ' | ' . ($row['staff_name'] ?: $row['source']) . ' | INR ' . number_format((float)$row['total_amount'], 2) . ' | ' . $row['status'];
+            }
+            header('Content-Type: application/pdf');
+            header('Content-Disposition: inline; filename="sales-report-' . $from . '-to-' . $to . '.pdf"');
+            echo simple_pdf($lines);
+            exit;
+        }
         json_response(['report' => $payload]);
     }
     if ($path === '/admin/dashboard' && $method === 'GET') {
+        [$todayStart, $tomorrowStart] = today_range();
+        $todayParams = [$todayStart, $tomorrowStart];
+        $todayScalar = function (string $sql, array $params = []) {
+            $stmt = db()->prepare($sql);
+            $stmt->execute($params);
+            return $stmt->fetchColumn();
+        };
         $stats = [
             'total_orders' => (int)db()->query('SELECT COUNT(*) FROM orders')->fetchColumn(),
             'pending_orders' => (int)db()->query("SELECT COUNT(*) FROM orders WHERE status IN ('received','accepted','preparing','ready','out_for_delivery') OR (order_type='delivery' AND status='picked_up')")->fetchColumn(),
             'completed_orders' => (int)db()->query("SELECT COUNT(*) FROM orders WHERE status='delivered' OR (order_type IN ('takeaway','dine_in') AND status='picked_up')")->fetchColumn(),
             'revenue' => (float)db()->query("SELECT COALESCE(SUM(paid_amount),0) FROM orders WHERE payment_status IN ('Paid','Partially Paid')")->fetchColumn(),
-            'today_total_sales' => (float)db()->query("SELECT COALESCE(SUM(paid_amount),0) FROM orders WHERE DATE(created_at)=CURDATE() AND payment_status IN ('Paid','Partially Paid','COD')")->fetchColumn(),
-            'today_online_sales' => (float)db()->query("SELECT COALESCE(SUM(paid_amount),0) FROM orders WHERE DATE(created_at)=CURDATE() AND (source='customer_online' OR payment_method='razorpay') AND payment_status IN ('Paid','Partially Paid')")->fetchColumn(),
-            'today_offline_sales' => (float)db()->query("SELECT COALESCE(SUM(paid_amount),0) FROM orders WHERE DATE(created_at)=CURDATE() AND source='staff_offline'")->fetchColumn(),
-            'today_cash_sales' => (float)db()->query("SELECT COALESCE(SUM(GREATEST(COALESCE(cash_received,0)-COALESCE(change_amount,cash_change,0),0)),0) FROM orders WHERE DATE(created_at)=CURDATE() AND source='staff_offline'")->fetchColumn(),
-            'today_counter_online_sales' => (float)db()->query("SELECT COALESCE(SUM(online_received),0) FROM orders WHERE DATE(created_at)=CURDATE() AND source='staff_offline'")->fetchColumn(),
-            'today_average_order' => (float)db()->query("SELECT COALESCE(AVG(total_amount),0) FROM orders WHERE DATE(created_at)=CURDATE()")->fetchColumn(),
-            'staff_orders_today' => (int)db()->query("SELECT COUNT(*) FROM orders WHERE DATE(created_at)=CURDATE() AND source='staff_offline'")->fetchColumn(),
-            'customer_online_orders_today' => (int)db()->query("SELECT COUNT(*) FROM orders WHERE DATE(created_at)=CURDATE() AND source='customer_online'")->fetchColumn(),
+            'today_total_sales' => (float)$todayScalar("SELECT COALESCE(SUM(paid_amount),0) FROM orders WHERE created_at >= ? AND created_at < ? AND payment_status IN ('Paid','Partially Paid','COD')", $todayParams),
+            'today_online_sales' => (float)$todayScalar("SELECT COALESCE(SUM(paid_amount),0) FROM orders WHERE created_at >= ? AND created_at < ? AND (source='customer_online' OR payment_method='razorpay') AND payment_status IN ('Paid','Partially Paid')", $todayParams),
+            'today_offline_sales' => (float)$todayScalar("SELECT COALESCE(SUM(paid_amount),0) FROM orders WHERE created_at >= ? AND created_at < ? AND source='staff_offline'", $todayParams),
+            'today_cash_sales' => (float)$todayScalar("SELECT COALESCE(SUM(GREATEST(COALESCE(cash_received,0)-COALESCE(change_amount,cash_change,0),0)),0) FROM orders WHERE created_at >= ? AND created_at < ? AND source='staff_offline'", $todayParams),
+            'today_counter_online_sales' => (float)$todayScalar("SELECT COALESCE(SUM(online_received),0) FROM orders WHERE created_at >= ? AND created_at < ? AND source='staff_offline'", $todayParams),
+            'today_average_order' => (float)$todayScalar("SELECT COALESCE(AVG(total_amount),0) FROM orders WHERE created_at >= ? AND created_at < ?", $todayParams),
+            'today_pending_orders' => (int)$todayScalar("SELECT COUNT(*) FROM orders WHERE created_at >= ? AND created_at < ? AND status NOT IN ('delivered','cancelled')", $todayParams),
+            'today_completed_orders' => (int)$todayScalar("SELECT COUNT(*) FROM orders WHERE created_at >= ? AND created_at < ? AND status='delivered'", $todayParams),
+            'staff_orders_today' => (int)$todayScalar("SELECT COUNT(*) FROM orders WHERE created_at >= ? AND created_at < ? AND source='staff_offline'", $todayParams),
+            'customer_online_orders_today' => (int)$todayScalar("SELECT COUNT(*) FROM orders WHERE created_at >= ? AND created_at < ? AND source='customer_online'", $todayParams),
             'pending_payments' => (float)db()->query("SELECT COALESCE(SUM(remaining_amount),0) FROM orders WHERE remaining_amount > 0")->fetchColumn(),
             'low_stock_products' => (int)db()->query('SELECT COUNT(*) FROM menu_items WHERE stock <= low_stock_threshold')->fetchColumn(),
         ];
@@ -3012,7 +3426,12 @@ if (str_starts_with($path, '/admin')) {
             GROUP BY u.id
             ORDER BY u.name LIMIT ? OFFSET ?";
         $stmt = paginated_query($sql, [], $pagination);
-        json_response(['staff' => $stmt->fetchAll(), 'pagination' => $pagination]);
+        $rows = $stmt->fetchAll();
+        foreach ($rows as &$row) {
+            $row['permissions'] = staff_permissions((int)$row['id']);
+        }
+        unset($row);
+        json_response(['staff' => $rows, 'pagination' => $pagination, 'permission_keys' => staff_permission_keys()]);
     }
     if ($path === '/admin/staff' && $method === 'POST') {
         require_fields($data, ['name', 'phone', 'email', 'password']);
@@ -3026,9 +3445,12 @@ if (str_starts_with($path, '/admin')) {
             json_response(['error' => 'A user with this email already exists'], 422);
         }
         $id = (int)db()->lastInsertId();
+        save_staff_permissions($id, is_array($data['permissions'] ?? null) ? $data['permissions'] : default_staff_permissions());
         $fresh = db()->prepare("SELECT id, name, phone, email, role, is_active FROM users WHERE id=? AND role='staff'");
         $fresh->execute([$id]);
-        json_response(['staff' => $fresh->fetch()], 201);
+        $created = $fresh->fetch();
+        $created['permissions'] = staff_permissions($id);
+        json_response(['staff' => $created], 201);
     }
     if (preg_match('#^/admin/staff/(\d+)$#', $path, $m) && $method === 'PUT') {
         $stmt = db()->prepare("SELECT * FROM users WHERE id=? AND role='staff' LIMIT 1");
@@ -3050,9 +3472,14 @@ if (str_starts_with($path, '/admin')) {
                 ->execute([$name, $phone, $email, $isActive, $staffRow['id']]);
             if (!$isActive) db()->prepare('DELETE FROM auth_tokens WHERE user_id=?')->execute([$staffRow['id']]);
         }
+        if (is_array($data['permissions'] ?? null)) {
+            save_staff_permissions((int)$staffRow['id'], $data['permissions']);
+        }
         $fresh = db()->prepare("SELECT id, name, phone, email, role, is_active FROM users WHERE id=? AND role='staff'");
         $fresh->execute([$staffRow['id']]);
-        json_response(['staff' => $fresh->fetch()]);
+        $updated = $fresh->fetch();
+        $updated['permissions'] = staff_permissions((int)$staffRow['id']);
+        json_response(['staff' => $updated]);
     }
     if ($path === '/admin/product-image' && $method === 'POST') {
         if (empty($_FILES['image']) || !is_array($_FILES['image'])) {
@@ -3185,6 +3612,31 @@ if (str_starts_with($path, '/admin')) {
     }
     if ($path === '/admin/orders' && $method === 'GET') {
         $pagination = pagination_params(50, 200);
+        $where = '1=1';
+        $params = [];
+        if (($_GET['scope'] ?? '') === 'today') {
+            [$todayStart, $tomorrowStart] = today_range();
+            $where .= ' AND o.created_at >= ? AND o.created_at < ?';
+            $params[] = $todayStart;
+            $params[] = $tomorrowStart;
+        }
+        if (($_GET['source'] ?? '') !== '') {
+            $sourceFilter = (string)$_GET['source'];
+            if (!in_array($sourceFilter, ['customer_online','staff_offline'], true)) json_response(['error' => 'Invalid source filter'], 422);
+            $where .= ' AND o.source=?';
+            $params[] = $sourceFilter;
+        }
+        if (($_GET['status'] ?? '') !== '') {
+            $statusFilter = (string)$_GET['status'];
+            if (!in_array($statusFilter, order_statuses(), true)) json_response(['error' => 'Invalid status filter'], 422);
+            $where .= ' AND o.status=?';
+            $params[] = $statusFilter;
+        }
+        if (($_GET['q'] ?? '') !== '') {
+            $q = '%' . trim((string)$_GET['q']) . '%';
+            $where .= ' AND (o.order_number LIKE ? OR o.guest_name LIKE ? OR o.guest_phone LIKE ? OR u.name LIKE ? OR u.phone LIKE ? OR staff.name LIKE ?)';
+            array_push($params, $q, $q, $q, $q, $q, $q);
+        }
         $sql = "SELECT o.*, COALESCE(u.name, o.guest_name, 'Guest Customer') AS customer_name, COALESCE(u.phone, o.guest_phone, '') AS customer_phone, dboy.name AS delivery_boy_name, dboy.phone AS delivery_boy_phone, staff.name AS staff_name,
             COALESCE(items.items_summary, '') AS items_summary, COALESCE(items.items_count, 0) AS items_count,
             dl.latitude AS driver_latitude, dl.longitude AS driver_longitude, dl.accuracy AS driver_accuracy, dl.recorded_at AS driver_recorded_at
@@ -3199,15 +3651,26 @@ if (str_starts_with($path, '/admin')) {
                 GROUP BY order_id
             ) items ON items.order_id=o.id
             LEFT JOIN delivery_locations dl ON dl.order_id=o.id
+            WHERE $where
             ORDER BY o.created_at DESC
             LIMIT ? OFFSET ?";
-        $stmt = paginated_query($sql, [], $pagination);
+        $stmt = paginated_query($sql, $params, $pagination);
         json_response(['orders' => $stmt->fetchAll(), 'statuses' => order_statuses(), 'pagination' => $pagination]);
     }
     if (preg_match('#^/admin/orders/(\d+)/tracking$#', $path, $m) && $method === 'GET') {
         $order = order_with_customer((int)$m[1]);
         if (!$order) json_response(['error' => 'Order not found'], 404);
         json_response(order_tracking_payload($order));
+    }
+    if (preg_match('#^/admin/orders/(\d+)/edit$#', $path, $m)) {
+        $order = order_with_customer((int)$m[1]);
+        if (!$order) json_response(['error' => 'Order not found'], 404);
+        if ($method === 'GET') {
+            json_response(editable_order_payload($order));
+        }
+        if ($method === 'PUT') {
+            json_response(apply_order_item_edit($order, is_array($data['items'] ?? null) ? $data['items'] : [], (int)$admin['id'], 'admin'));
+        }
     }
     if (preg_match('#^/admin/orders/(\d+)/invoice$#', $path, $m) && $method === 'GET') {
         $order = order_with_customer((int)$m[1]);

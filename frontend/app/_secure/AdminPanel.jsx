@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import Script from 'next/script';
-import { Bell, Camera, Clock, CreditCard, Eye, FileText, Gift, KeyRound, LayoutDashboard, LogOut, Mail, MapPinned, Megaphone, Menu, Palette, Power, Printer, RotateCcw, Save, Settings, ShieldAlert, ShoppingBag, Tag, Truck, Upload, UserRound, Utensils, X } from 'lucide-react';
+import { Bell, Camera, Clock, CreditCard, Eye, FileText, Gift, KeyRound, LayoutDashboard, LogOut, Mail, MapPinned, Megaphone, Menu, Minus, Palette, Plus, Power, Printer, RotateCcw, Save, Search, Settings, ShieldAlert, ShoppingBag, Tag, Trash2, Truck, Upload, UserRound, Utensils, X } from 'lucide-react';
 import { API_BASE, adminApi, adminLogout, adminUploadApi, api, applyTheme, clearToken, downloadInvoice, inr, itemSelectionText, itemVariantText, openInvoice, productImage, refreshAdminSession, setThemeMode, setToken, storedThemeMode, token } from '../lib';
 
 const resources = {
@@ -76,6 +76,17 @@ const weekDays = ['monday','tuesday','wednesday','thursday','friday','saturday',
 const pizzaSizes = [['S', 'Small'], ['M', 'Medium'], ['L', 'Large']];
 const featureControlKeys = ['customer_theme_enabled', 'customer_dark_mode_enabled', 'online_ordering_enabled', 'delivery_enabled', 'takeaway_enabled', 'staff_pos_enabled', 'razorpay_enabled', 'google_maps_enabled', 'guest_checkout_enabled', 'customer_login_enabled'];
 const hiddenGeneralSettings = new Set(['customer_login_required', 'accept_orders', 'force_close_orders', 'order_manual_override', 'order_schedule', 'customer_default_theme', 'admin_theme_mode', ...featureControlKeys]);
+const staffPermissionLabels = {
+  create_orders: ['Can Create Orders', 'Allow staff to submit POS/counter orders.'],
+  view_current_orders: ['Can View Current Orders', 'Allow staff to see active orders on POS.'],
+  confirm_orders: ['Can Confirm Orders', 'Allow staff to move created orders to confirmed.'],
+  mark_order_ready_complete: ['Can Mark Ready/Complete', 'Allow staff to mark orders ready and completed.'],
+  edit_orders: ['Can Edit Orders', 'Allow staff to edit their own active POS orders.'],
+  view_today_orders: ["Can View Today's Orders", 'Allow staff to see current-day order count.'],
+  view_reports: ['Can View Reports', 'Allow staff report access if staff reports are exposed.']
+};
+
+const defaultStaffPermissions = Object.fromEntries(Object.keys(staffPermissionLabels).map(key => [key, !['edit_orders', 'view_reports'].includes(key)]));
 
 const featureControlLabels = {
   customer_theme_enabled: ['Customer Theme', 'Show customer-facing theme controls in the website header/menu.'],
@@ -335,7 +346,7 @@ function AcceptOrderModal({ order, prepMinutes, customPrepMinutes, onPrepChange,
   );
 }
 
-function OrderDetailsModal({ data, loading, onClose, onViewInvoice, onDownloadInvoice, onEmailInvoice }) {
+function OrderDetailsModal({ data, loading, onClose, onEditOrder, onViewInvoice, onDownloadInvoice, onEmailInvoice }) {
   const order = data?.order;
   const items = data?.items || [];
   if (!order && !loading) return null;
@@ -384,6 +395,7 @@ function OrderDetailsModal({ data, loading, onClose, onViewInvoice, onDownloadIn
               <div className="grand"><span>Total</span><strong>{inr(order.total_amount)}</strong></div>
             </div>
             <div className="action-row confirmation-actions">
+              <button className="ghost" onClick={() => onEditOrder(order)}><ShoppingBag size={16} /> Edit Order</button>
               <button className="ghost" onClick={() => onViewInvoice(order)}><FileText size={16} /> View Invoice</button>
               <button className="ghost" onClick={() => onViewInvoice(order)}><FileText size={16} /> Generate Invoice</button>
               <button className="ghost" onClick={() => onDownloadInvoice(order)}><Printer size={16} /> Download / Print</button>
@@ -391,6 +403,184 @@ function OrderDetailsModal({ data, loading, onClose, onViewInvoice, onDownloadIn
             </div>
           </>
         )}
+      </section>
+    </div>
+  );
+}
+
+function editOptionPrice(option, variantName) {
+  if (variantName === 'S') return Number(option.small_price || option.fixed_price || 0);
+  if (variantName === 'M') return Number(option.medium_price || option.fixed_price || 0);
+  if (variantName === 'L') return Number(option.large_price || option.fixed_price || 0);
+  return Number(option.fixed_price || option.small_price || 0);
+}
+
+function editVariantLabel(name) {
+  if (name === 'S') return 'Small';
+  if (name === 'M') return 'Medium';
+  if (name === 'L') return 'Large';
+  return name || 'Regular';
+}
+
+function OrderEditModal({ data, menu, saving, onClose, onSave }) {
+  const order = data?.order;
+  const menuItems = menu?.items || [];
+  const categories = menu?.categories || [];
+  const optionGroups = menu?.option_groups || [];
+  const [lines, setLines] = useState([]);
+  const [addDraft, setAddDraft] = useState({ q: '', category_id: '', item_id: '', variant_id: '', option_ids: [], quantity: 1 });
+
+  useEffect(() => {
+    if (!data?.items) return;
+    setLines(data.items.map(item => {
+      const optionIds = (item.selection_meta?.options || []).map(option => Number(option.id)).filter(Boolean);
+      return {
+        rowKey: `existing-${item.id}`,
+        id: Number(item.menu_item_id),
+        name: item.name_snapshot,
+        variant_id: item.variant_id || '',
+        variant_name: item.variant_snapshot || '',
+        option_ids: optionIds,
+        quantity: Math.max(1, Number(item.quantity || 1)),
+        is_bogo_free: Boolean(item.is_bogo_free),
+        bogo_parent_key: item.bogo_parent_key || '',
+      };
+    }));
+  }, [data]);
+
+  if (!order) return null;
+
+  const filteredProducts = menuItems.filter(item => {
+    const categoryMatch = !addDraft.category_id || String(item.category_id) === String(addDraft.category_id);
+    const q = addDraft.q.trim().toLowerCase();
+    return categoryMatch && (!q || `${item.name} ${item.description || ''}`.toLowerCase().includes(q));
+  });
+  const selectedProduct = menuItems.find(item => String(item.id) === String(addDraft.item_id)) || null;
+  const selectedVariant = selectedProduct?.variants?.find(variant => String(variant.id) === String(addDraft.variant_id)) || selectedProduct?.variants?.find(variant => Number(variant.is_default) === 1) || selectedProduct?.variants?.[0] || null;
+  const addOptionRows = optionGroups.flatMap(group => (group.options || []).map(option => ({ ...option, group_name: group.name }))).filter(option => {
+    if (!selectedProduct) return false;
+    const isPizza = ['S', 'M', 'L'].includes(selectedVariant?.name);
+    return isPizza || (option.applies_to || 'pizza') !== 'pizza';
+  });
+
+  function productForLine(line) {
+    return menuItems.find(item => Number(item.id) === Number(line.id)) || null;
+  }
+
+  function optionRowsForLine(line) {
+    const product = productForLine(line);
+    const variant = product?.variants?.find(v => String(v.id) === String(line.variant_id)) || null;
+    const isPizza = ['S', 'M', 'L'].includes(variant?.name || line.variant_name);
+    return optionGroups.flatMap(group => (group.options || []).map(option => ({ ...option, group_name: group.name }))).filter(option => isPizza || (option.applies_to || 'pizza') !== 'pizza');
+  }
+
+  function changeLine(rowKey, patch) {
+    setLines(current => current.map(line => line.rowKey === rowKey ? { ...line, ...patch } : line));
+  }
+
+  function addLine() {
+    if (!selectedProduct) return;
+    const variant = selectedVariant;
+    const optionIds = (addDraft.option_ids || []).map(Number).sort((a, b) => a - b);
+    setLines(current => [...current, {
+      rowKey: `new-${Date.now()}-${Math.random()}`,
+      id: Number(selectedProduct.id),
+      name: selectedProduct.name,
+      variant_id: variant?.id || '',
+      variant_name: variant?.name || '',
+      option_ids: optionIds,
+      quantity: Math.max(1, Number(addDraft.quantity || 1)),
+      is_bogo_free: false,
+      bogo_parent_key: '',
+    }]);
+    setAddDraft({ q: '', category_id: addDraft.category_id, item_id: '', variant_id: '', option_ids: [], quantity: 1 });
+  }
+
+  function toggleAddOption(optionId, checked) {
+    setAddDraft(current => ({ ...current, option_ids: checked ? [...current.option_ids, Number(optionId)] : current.option_ids.filter(id => Number(id) !== Number(optionId)) }));
+  }
+
+  function toggleLineOption(line, optionId, checked) {
+    const next = checked ? [...(line.option_ids || []), Number(optionId)] : (line.option_ids || []).filter(id => Number(id) !== Number(optionId));
+    changeLine(line.rowKey, { option_ids: Array.from(new Set(next)) });
+  }
+
+  function localUnit(line) {
+    const product = productForLine(line);
+    if (!product) return 0;
+    const variant = product.variants?.find(v => String(v.id) === String(line.variant_id)) || product.variants?.[0] || null;
+    const options = optionRowsForLine(line).filter(option => (line.option_ids || []).includes(Number(option.id)));
+    return Number(variant?.price ?? product.price) + options.reduce((sum, option) => sum + editOptionPrice(option, variant?.name || line.variant_name), 0);
+  }
+
+  const localSubtotal = lines.reduce((sum, line) => sum + localUnit(line) * Number(line.quantity || 1), 0);
+
+  return (
+    <div className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true" aria-label="Edit order">
+      <section className="admin-order-modal order-edit-modal">
+        <button className="icon-button modal-close" onClick={onClose} aria-label="Close edit order"><X size={18} /></button>
+        <span className="eyebrow">Edit Order</span>
+        <h2>{order.order_number}</h2>
+        <div className="confirmation-grid compact">
+          <div><span>Customer</span><strong>{order.customer_name || 'Customer'}</strong></div>
+          <div><span>Phone</span><strong>{order.customer_phone || '-'}</strong></div>
+          <div><span>Type</span><strong>{order.order_type === 'dine_in' ? 'Dine-in' : order.order_type === 'takeaway' ? 'Takeaway' : 'Delivery'}</strong></div>
+          <div><span>Status</span><strong>{orderStatusLabel(order)}</strong></div>
+        </div>
+        {!data.can_edit ? <p className="notice error">This order cannot be edited after delivery starts, delivery completes, or cancellation.</p> : null}
+        <div className="order-edit-grid">
+          <section className="order-edit-current">
+            <h3>Current Items</h3>
+            {lines.map(line => {
+              const product = productForLine(line);
+              const variants = product?.variants || [];
+              const variant = variants.find(v => String(v.id) === String(line.variant_id)) || variants[0] || null;
+              const optionRows = optionRowsForLine(line);
+              return (
+                <article className="order-edit-line" key={line.rowKey}>
+                  <div>
+                    <strong>{line.name || product?.name || 'Menu item'} {line.is_bogo_free ? <span className="bogo-free-badge">FREE</span> : null}</strong>
+                    <small>{editVariantLabel(variant?.name || line.variant_name)} · {inr(localUnit(line))} each</small>
+                  </div>
+                  {variants.length ? <select value={line.variant_id || ''} onChange={event => changeLine(line.rowKey, { variant_id: event.target.value, variant_name: variants.find(v => String(v.id) === event.target.value)?.name || '', option_ids: [] })}>{variants.map(variantRow => <option key={variantRow.id} value={variantRow.id}>{editVariantLabel(variantRow.name)} · {inr(variantRow.price)}</option>)}</select> : null}
+                  {optionRows.length ? <div className="order-edit-options">{optionRows.map(option => <label key={option.id}><input type="checkbox" checked={(line.option_ids || []).includes(Number(option.id))} onChange={event => toggleLineOption(line, option.id, event.target.checked)} /> {option.group_name}: {option.name} <span>+{inr(editOptionPrice(option, variant?.name || line.variant_name))}</span></label>)}</div> : null}
+                  <div className="order-edit-line-actions">
+                    <div className="quantity-control small"><button onClick={() => changeLine(line.rowKey, { quantity: Math.max(1, Number(line.quantity) - 1) })}><Minus size={14} /></button><strong>{line.quantity}</strong><button onClick={() => changeLine(line.rowKey, { quantity: Number(line.quantity) + 1 })}><Plus size={14} /></button></div>
+                    <strong>{line.is_bogo_free ? 'FREE' : inr(localUnit(line) * Number(line.quantity))}</strong>
+                    <button className="ghost danger" onClick={() => { if (window.confirm('Remove this item from the order?')) setLines(current => current.filter(row => row.rowKey !== line.rowKey)); }}><Trash2 size={15} /> Remove</button>
+                  </div>
+                </article>
+              );
+            })}
+            {!lines.length ? <div className="empty-state compact">No items in this order.</div> : null}
+          </section>
+          <section className="order-edit-add">
+            <h3>Add Item</h3>
+            <label className="search-box"><Search size={18} /><input value={addDraft.q} onChange={event => setAddDraft({ ...addDraft, q: event.target.value })} placeholder="Search product" /></label>
+            <label>Category<select value={addDraft.category_id} onChange={event => setAddDraft({ ...addDraft, category_id: event.target.value, item_id: '', variant_id: '', option_ids: [] })}><option value="">All categories</option>{categories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
+            <label>Product<select value={addDraft.item_id} onChange={event => {
+              const product = menuItems.find(item => String(item.id) === event.target.value);
+              const variant = product?.variants?.find(v => Number(v.is_default) === 1) || product?.variants?.[0] || null;
+              setAddDraft({ ...addDraft, item_id: event.target.value, variant_id: variant?.id || '', option_ids: [] });
+            }}><option value="">Select product</option>{filteredProducts.map(product => <option key={product.id} value={product.id}>{product.name}</option>)}</select></label>
+            {selectedProduct?.variants?.length ? <label>Size / Variant<select value={addDraft.variant_id || selectedVariant?.id || ''} onChange={event => setAddDraft({ ...addDraft, variant_id: event.target.value, option_ids: [] })}>{selectedProduct.variants.map(variant => <option key={variant.id} value={variant.id}>{editVariantLabel(variant.name)} · {inr(variant.price)}</option>)}</select></label> : null}
+            {addOptionRows.length ? <div className="order-edit-options">{addOptionRows.map(option => <label key={option.id}><input type="checkbox" checked={(addDraft.option_ids || []).includes(Number(option.id))} onChange={event => toggleAddOption(option.id, event.target.checked)} /> {option.group_name}: {option.name} <span>+{inr(editOptionPrice(option, selectedVariant?.name))}</span></label>)}</div> : null}
+            <div className="quantity-control"><button onClick={() => setAddDraft({ ...addDraft, quantity: Math.max(1, Number(addDraft.quantity) - 1) })}><Minus size={14} /></button><strong>{addDraft.quantity}</strong><button onClick={() => setAddDraft({ ...addDraft, quantity: Number(addDraft.quantity) + 1 })}><Plus size={14} /></button></div>
+            <button onClick={addLine} disabled={!selectedProduct}><Plus size={16} /> Add Item</button>
+          </section>
+        </div>
+        <div className="totals order-edit-summary">
+          <div><span>Preview Subtotal</span><strong>{inr(localSubtotal)}</strong></div>
+          <div><span>Current Discount</span><strong>-{inr(order.discount_amount || 0)}</strong></div>
+          <div><span>Current Delivery</span><strong>{inr(order.delivery_charge || 0)}</strong></div>
+          <div><span>Current Paid</span><strong>{inr(order.paid_amount || 0)}</strong></div>
+          <div><span>Current Remaining</span><strong>{inr(order.remaining_amount || 0)}</strong></div>
+          <div className="grand"><span>Server will recalculate on save</span><strong>{inr(order.total_amount || 0)}</strong></div>
+        </div>
+        <div className="action-row confirmation-actions">
+          <button className="ghost" onClick={onClose}>Cancel</button>
+          <button onClick={() => onSave(lines)} disabled={saving || !data.can_edit || !lines.length}><Save size={16} /> {saving ? 'Saving...' : 'Save Changes'}</button>
+        </div>
       </section>
     </div>
   );
@@ -460,17 +650,23 @@ export default function AdminPage() {
   const [productImagePreview, setProductImagePreview] = useState('');
   const [editing, setEditing] = useState(null);
   const [orders, setOrders] = useState([]);
+  const [todayOrders, setTodayOrders] = useState([]);
+  const [orderFilters, setOrderFilters] = useState({ q: '', source: '', status: '' });
   const [orderDetails, setOrderDetails] = useState(null);
   const [orderDetailsLoading, setOrderDetailsLoading] = useState(false);
+  const [orderEdit, setOrderEdit] = useState(null);
+  const [orderEditLoading, setOrderEditLoading] = useState(false);
+  const [orderEditSaving, setOrderEditSaving] = useState(false);
+  const [orderEditMenu, setOrderEditMenu] = useState({ categories: [], items: [], option_groups: [] });
   const [deliveryBoys, setDeliveryBoys] = useState([]);
   const [deliveryBoyForm, setDeliveryBoyForm] = useState({ name: '', phone: '', email: '', password: '', is_active: '1' });
   const [editingDeliveryBoy, setEditingDeliveryBoy] = useState(null);
   const [staff, setStaff] = useState([]);
-  const [staffForm, setStaffForm] = useState({ name: '', phone: '', email: '', password: '', is_active: '1' });
+  const [staffForm, setStaffForm] = useState({ name: '', phone: '', email: '', password: '', is_active: '1', permissions: defaultStaffPermissions });
   const [editingStaff, setEditingStaff] = useState(null);
   const [staffPerformance, setStaffPerformance] = useState([]);
   const [salesReport, setSalesReport] = useState(null);
-  const [reportFilters, setReportFilters] = useState({ preset: 'today', from: new Date().toISOString().slice(0, 10), to: new Date().toISOString().slice(0, 10), staff_id: '' });
+  const [reportFilters, setReportFilters] = useState({ preset: 'today', from: new Date().toISOString().slice(0, 10), to: new Date().toISOString().slice(0, 10), staff_id: '', source: '', payment_status: '', status: '' });
   const [deliverySlabTest, setDeliverySlabTest] = useState({ order_amount: '550', distance_km: '4.5', order_type: 'delivery' });
   const [deliverySlabResult, setDeliverySlabResult] = useState(null);
   const [payments, setPayments] = useState([]);
@@ -593,7 +789,13 @@ export default function AdminPage() {
         }
       }
       else if (active === 'orders') {
-        const [ordersData, boysData] = await Promise.all([adminRequest('/admin/orders'), adminRequest('/admin/delivery-boys')]);
+        const historyParams = new URLSearchParams(Object.fromEntries(Object.entries(orderFilters).filter(([, value]) => value)));
+        const [todayData, ordersData, boysData] = await Promise.all([
+          adminRequest('/admin/orders?scope=today'),
+          adminRequest(`/admin/orders${historyParams.toString() ? `?${historyParams}` : ''}`),
+          adminRequest('/admin/delivery-boys')
+        ]);
+        setTodayOrders(todayData.orders || []);
         setOrders(ordersData.orders || []);
         setDeliveryBoys(boysData.delivery_boys || []);
       }
@@ -867,13 +1069,13 @@ export default function AdminPage() {
 
   async function saveStaff() {
     try {
-      const payload = { ...staffForm, is_active: staffForm.is_active === '1' ? 1 : 0 };
+      const payload = { ...staffForm, is_active: staffForm.is_active === '1' ? 1 : 0, permissions: { ...defaultStaffPermissions, ...(staffForm.permissions || {}) } };
       if (editingStaff) {
         await adminRequest(`/admin/staff/${editingStaff}`, { method: 'PUT', body: JSON.stringify(payload) });
       } else {
         await adminRequest('/admin/staff', { method: 'POST', body: JSON.stringify(payload) });
       }
-      setStaffForm({ name: '', phone: '', email: '', password: '', is_active: '1' });
+      setStaffForm({ name: '', phone: '', email: '', password: '', is_active: '1', permissions: defaultStaffPermissions });
       setEditingStaff(null);
       setMessage('Staff account saved.');
       setStaff((await adminRequest('/admin/staff')).staff || []);
@@ -926,8 +1128,12 @@ export default function AdminPage() {
 
   function editStaffMember(member) {
     setEditingStaff(member.id);
-    setStaffForm({ name: member.name || '', phone: member.phone || '', email: member.email || '', password: '', is_active: String(member.is_active ?? '1') });
+    setStaffForm({ name: member.name || '', phone: member.phone || '', email: member.email || '', password: '', is_active: String(member.is_active ?? '1'), permissions: { ...defaultStaffPermissions, ...(member.permissions || {}) } });
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function updateStaffPermission(key, allowed) {
+    setStaffForm(current => ({ ...current, permissions: { ...defaultStaffPermissions, ...(current.permissions || {}), [key]: allowed } }));
   }
 
   async function openAcceptOrder(order) {
@@ -973,6 +1179,51 @@ export default function AdminPage() {
       setMessage(err.message);
     } finally {
       setOrderDetailsLoading(false);
+    }
+  }
+
+  async function openOrderEdit(order) {
+    setOrderEditLoading(true);
+    setActive('orders');
+    try {
+      const [details, menu] = await Promise.all([
+        adminRequest(`/admin/orders/${order.id}/edit`),
+        api('/menu')
+      ]);
+      setOrderEdit(details);
+      setOrderEditMenu(menu);
+      setOrderDetails(null);
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setOrderEditLoading(false);
+    }
+  }
+
+  async function saveOrderEdit(lines) {
+    if (!orderEdit?.order) return;
+    setOrderEditSaving(true);
+    try {
+      const payload = {
+        items: lines.map(line => ({
+          id: line.id,
+          variant_id: line.variant_id || null,
+          option_ids: line.option_ids || [],
+          quantity: line.quantity,
+          client_key: line.rowKey,
+          is_bogo_free: Boolean(line.is_bogo_free),
+          bogo_parent_key: line.bogo_parent_key || ''
+        }))
+      };
+      const data = await adminRequest(`/admin/orders/${orderEdit.order.id}/edit`, { method: 'PUT', body: JSON.stringify(payload) });
+      setOrderEdit(null);
+      setOrderDetails(data);
+      setMessage('Order updated and totals recalculated.');
+      loadActive();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setOrderEditSaving(false);
     }
   }
 
@@ -1049,6 +1300,20 @@ export default function AdminPage() {
       document.body.appendChild(link);
       link.click();
       link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (err) {
+      setMessage(err.message);
+    }
+  }
+
+  async function exportSalesPdf() {
+    try {
+      const params = new URLSearchParams({ ...reportFilters, format: 'pdf' });
+      const res = await fetch(`${API_BASE}/admin/reports/sales?${params}`, { headers: { Authorization: `Bearer ${token()}` }, credentials: 'include', cache: 'no-store' });
+      if (!res.ok) throw new Error('Unable to export sales PDF.');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener,noreferrer');
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch (err) {
       setMessage(err.message);
@@ -1263,6 +1528,58 @@ export default function AdminPage() {
     return payload;
   }
 
+  function renderAdminOrdersTable(rows, emptyText = 'No orders found.') {
+    return (
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Order</th><th>Source</th><th>Customer</th><th>Type</th><th>Items</th><th>Total</th><th>Paid</th><th>Payment</th><th>Delivery Boy</th><th>Tracking</th><th>Ready</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>{rows.length ? rows.map(order => {
+            const next = nextStatuses(order);
+            return (
+              <tr id={`admin-order-${order.id}`} key={order.id}>
+                <td><strong>{order.order_number}</strong><p className="small-note">{order.created_at}</p></td>
+                <td><span className={order.source === 'staff_offline' ? 'badge warning' : 'badge success'}>{order.source === 'staff_offline' ? 'STAFF / OFFLINE' : 'ONLINE'}</span>{order.staff_name ? <p className="small-note">{order.staff_name}</p> : null}</td>
+                <td>{order.customer_name || 'Customer'}<p className="small-note">{order.customer_phone || ''}</p></td>
+                <td><span className="badge">{order.order_type === 'dine_in' ? 'Dine-in' : order.order_type === 'takeaway' ? 'Takeaway' : 'Delivery'}</span><p className="small-note">{order.order_type === 'delivery' ? `${order.distance_km || '-'} km` : (order.table_number ? `Table ${order.table_number}` : 'Counter order')}</p></td>
+                <td className="admin-items-summary">{order.items_summary || '-'}</td>
+                <td>{inr(order.total_amount)}</td>
+                <td>{inr(order.paid_amount)}<p className="small-note">Due {inr(order.remaining_amount)}</p></td>
+                <td><span className="badge">{order.payment_status}</span><p className="small-note">{order.payment_method || order.payment_mode}</p>{order.source === 'staff_offline' ? <p className="small-note">Cash {inr(order.cash_received || 0)} · Online {inr(order.online_received || 0)}</p> : null}</td>
+                <td>
+                  {order.order_type === 'delivery' && order.source !== 'staff_offline' ? (
+                    <select value={order.delivery_boy_id || ''} onChange={e => assignDeliveryBoy(order, e.target.value)} disabled={['out_for_delivery','delivered','cancelled'].includes(order.status)}>
+                      <option value="">Unassigned</option>
+                      {deliveryBoys.filter(boy => Number(boy.is_active) === 1).map(boy => <option key={boy.id} value={boy.id}>{boy.name}</option>)}
+                    </select>
+                  ) : '-'}
+                  {order.source !== 'staff_offline' && order.delivery_boy_name ? <p className="small-note">{order.delivery_boy_name}</p> : null}
+                </td>
+                <td>
+                  {order.order_type === 'delivery' && order.source !== 'staff_offline' ? (
+                    order.driver_recorded_at ? <><span className="badge success">Live</span><p className="small-note">Last location {order.driver_recorded_at}</p></> : <span className="small-note">No live location</span>
+                  ) : '-'}
+                  {order.order_type === 'delivery' && order.source !== 'staff_offline' && order.driver_latitude && order.latitude ? <AdminMiniMap order={order} /> : null}
+                </td>
+                <td>{order.source !== 'staff_offline' && order.estimated_ready_at ? <><strong>{order.estimated_ready_at}</strong><p className="small-note">{order.preparation_minutes} min prep</p></> : '-'}</td>
+                <td><span className="badge success">{orderStatusLabel(order)}</span></td>
+                <td>
+                  <div className="order-action-stack">
+                    <button className="ghost" onClick={() => openOrderDetails(order)}><Eye size={16} /> Details</button>
+                    <button className="ghost" onClick={() => openOrderEdit(order)}><ShoppingBag size={16} /> Edit Order</button>
+                    <button className="ghost" onClick={() => viewAdminInvoice(order, false)}><FileText size={16} /> Invoice</button>
+                    {order.status === 'delivered' && order.source === 'staff_offline' ? <span className="badge success">Completed</span> : null}
+                    {order.status === 'received' && isAlertableOrder(order) && order.source !== 'staff_offline' ? <button className="ghost" onClick={() => openAcceptOrder(order)}><Clock size={16} /> Accept</button> : null}
+                    {(order.source === 'staff_offline' ? next : next.filter(status => status !== 'accepted')).map(status => <button key={status} className={status === 'cancelled' ? 'ghost danger' : 'ghost'} onClick={() => updateOrder(order, { status })}>{adminOrderActionLabel(order, status)}</button>)}
+                  </div>
+                </td>
+              </tr>
+            );
+          }) : <tr><td colSpan="13"><div className="empty-state compact">{emptyText}</div></td></tr>}</tbody>
+        </table>
+      </div>
+    );
+  }
+
   if (!admin) {
     return (
       <main className="admin-login-screen">
@@ -1313,10 +1630,24 @@ export default function AdminPage() {
           data={orderDetails}
           loading={orderDetailsLoading}
           onClose={() => { setOrderDetails(null); setOrderDetailsLoading(false); }}
+          onEditOrder={openOrderEdit}
           onViewInvoice={order => viewAdminInvoice(order, false)}
           onDownloadInvoice={order => viewAdminInvoice(order, true)}
           onEmailInvoice={emailAdminInvoice}
         />
+      ) : null}
+      {(orderEdit || orderEditLoading) ? (
+        orderEditLoading ? (
+          <div className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true"><section className="admin-order-modal order-edit-modal"><div className="empty-state">Loading order editor...</div></section></div>
+        ) : (
+          <OrderEditModal
+            data={orderEdit}
+            menu={orderEditMenu}
+            saving={orderEditSaving}
+            onClose={() => { setOrderEdit(null); setOrderEditLoading(false); }}
+            onSave={saveOrderEdit}
+          />
+        )
       ) : null}
       {mobileNav ? <button className="admin-drawer-backdrop mobile-only" aria-label="Close admin navigation" onClick={() => setMobileNav(false)} /> : null}
       <aside className={mobileNav ? 'admin-sidebar open' : 'admin-sidebar'}>
@@ -1544,6 +1875,17 @@ export default function AdminPage() {
 
         {active === 'orders' && (
           <section className="panel table-panel">
+            <div className="panel-heading"><h2>Today&apos;s Orders</h2><p>Live orders created today. Historical orders remain below.</p></div>
+            {renderAdminOrdersTable(todayOrders, 'No orders created today yet.')}
+            <div className="panel-heading orders-history-heading">
+              <div><h2>All Orders / Order History</h2><p>Search and filter historical orders without cluttering today&apos;s live view.</p></div>
+              <div className="order-filter-bar">
+                <input placeholder="Search order, customer, phone, staff" value={orderFilters.q} onChange={e => setOrderFilters({ ...orderFilters, q: e.target.value })} />
+                <select value={orderFilters.source} onChange={e => setOrderFilters({ ...orderFilters, source: e.target.value })}><option value="">All Sources</option><option value="customer_online">Online</option><option value="staff_offline">Staff / Offline</option></select>
+                <select value={orderFilters.status} onChange={e => setOrderFilters({ ...orderFilters, status: e.target.value })}><option value="">All Statuses</option>{['received','accepted','preparing','ready','picked_up','out_for_delivery','delivered','cancelled'].map(status => <option value={status} key={status}>{statusLabel(status)}</option>)}</select>
+                <button className="ghost" onClick={loadActive}>Apply</button>
+              </div>
+            </div>
             <div className="table-wrap">
               <table>
                 <thead><tr><th>Order</th><th>Source</th><th>Customer</th><th>Type</th><th>Items</th><th>Total</th><th>Paid</th><th>Payment</th><th>Delivery Boy</th><th>Tracking</th><th>Ready</th><th>Status</th><th>Actions</th></tr></thead>
@@ -1579,6 +1921,7 @@ export default function AdminPage() {
                       <td>
                         <div className="order-action-stack">
                           <button className="ghost" onClick={() => openOrderDetails(order)}><Eye size={16} /> Details</button>
+                          <button className="ghost" onClick={() => openOrderEdit(order)}><ShoppingBag size={16} /> Edit Order</button>
                           <button className="ghost" onClick={() => viewAdminInvoice(order, false)}><FileText size={16} /> Invoice</button>
                           {order.status === 'delivered' && order.source === 'staff_offline' ? <span className="badge success">Completed</span> : null}
                           {order.status === 'received' && isAlertableOrder(order) && order.source !== 'staff_offline' ? <button className="ghost" onClick={() => openAcceptOrder(order)}><Clock size={16} /> Accept</button> : null}
@@ -1632,9 +1975,23 @@ export default function AdminPage() {
                 <label>Password<input type="password" placeholder={editingStaff ? 'Leave blank to keep current password' : ''} value={staffForm.password} onChange={e => setStaffForm({ ...staffForm, password: e.target.value })} /></label>
                 <label>Status<select value={staffForm.is_active} onChange={e => setStaffForm({ ...staffForm, is_active: e.target.value })}><option value="1">Active</option><option value="0">Inactive</option></select></label>
               </div>
+              <fieldset className="staff-permission-panel">
+                <legend>Staff Permissions</legend>
+                <div className="feature-control-grid">
+                  {Object.entries(staffPermissionLabels).map(([key, [label, description]]) => (
+                    <ToggleSwitch
+                      key={key}
+                      checked={Boolean((staffForm.permissions || defaultStaffPermissions)[key])}
+                      onChange={checked => updateStaffPermission(key, checked)}
+                      label={label}
+                      description={description}
+                    />
+                  ))}
+                </div>
+              </fieldset>
               <div className="action-row">
                 <button onClick={saveStaff}>{editingStaff ? 'Save Staff' : 'Add Staff'}</button>
-                {editingStaff ? <button className="ghost" onClick={() => { setEditingStaff(null); setStaffForm({ name: '', phone: '', email: '', password: '', is_active: '1' }); }}>Cancel</button> : null}
+                {editingStaff ? <button className="ghost" onClick={() => { setEditingStaff(null); setStaffForm({ name: '', phone: '', email: '', password: '', is_active: '1', permissions: defaultStaffPermissions }); }}>Cancel</button> : null}
               </div>
             </section>
             <section className="panel table-panel">
@@ -1642,7 +1999,7 @@ export default function AdminPage() {
               <div className="table-wrap">
                 <table>
                   <thead><tr><th>Name</th><th>Mobile</th><th>Email</th><th>Orders</th><th>Sales</th><th>Status</th><th>Actions</th></tr></thead>
-                  <tbody>{staff.map(member => <tr key={member.id}><td>{member.name}</td><td>{member.phone}</td><td>{member.email}</td><td>{member.order_count || 0}</td><td>{inr(member.sales_total || 0)}</td><td><span className={Number(member.is_active) === 1 ? 'badge success' : 'badge warning'}>{Number(member.is_active) === 1 ? 'Active' : 'Inactive'}</span></td><td><button className="ghost" onClick={() => editStaffMember(member)}>Edit / Reset Password</button></td></tr>)}</tbody>
+                  <tbody>{staff.map(member => <tr key={member.id}><td>{member.name}</td><td>{member.phone}</td><td>{member.email}</td><td>{member.order_count || 0}</td><td>{inr(member.sales_total || 0)}</td><td><span className={Number(member.is_active) === 1 ? 'badge success' : 'badge warning'}>{Number(member.is_active) === 1 ? 'Active' : 'Inactive'}</span><p className="small-note">{Object.entries(member.permissions || {}).filter(([, allowed]) => allowed).length} permissions</p></td><td><button className="ghost" onClick={() => editStaffMember(member)}>Edit / Reset Password</button></td></tr>)}</tbody>
                 </table>
               </div>
             </section>
@@ -1665,12 +2022,16 @@ export default function AdminPage() {
           <section className="panel sales-report-panel">
             <div className="panel-heading"><h2>Sales Overview</h2><p>Daily sales, payment collection, staff sales, discounts, and BOGO impact.</p></div>
             <div className="report-filter-bar">
-              <label>Range<select value={reportFilters.preset} onChange={e => setReportFilters({ ...reportFilters, preset: e.target.value })}><option value="today">Today</option><option value="yesterday">Yesterday</option><option value="custom">Specific Date / Range</option></select></label>
+              <label>Range<select value={reportFilters.preset} onChange={e => setReportFilters({ ...reportFilters, preset: e.target.value })}><option value="today">Today</option><option value="yesterday">Yesterday</option><option value="this_week">This Week</option><option value="last_week">Last Week</option><option value="this_month">This Month</option><option value="last_month">Last Month</option><option value="custom">Custom Date Range</option></select></label>
               <label>From<input type="date" value={reportFilters.from} onChange={e => setReportFilters({ ...reportFilters, from: e.target.value, preset: 'custom' })} /></label>
               <label>To<input type="date" value={reportFilters.to} onChange={e => setReportFilters({ ...reportFilters, to: e.target.value, preset: 'custom' })} /></label>
               <label>Staff<select value={reportFilters.staff_id} onChange={e => setReportFilters({ ...reportFilters, staff_id: e.target.value })}><option value="">All staff</option>{staff.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>
+              <label>Source<select value={reportFilters.source} onChange={e => setReportFilters({ ...reportFilters, source: e.target.value })}><option value="">All sources</option><option value="customer_online">Online customer</option><option value="staff_offline">Staff / offline</option></select></label>
+              <label>Payment<select value={reportFilters.payment_status} onChange={e => setReportFilters({ ...reportFilters, payment_status: e.target.value })}><option value="">All payments</option>{['Pending','Partially Paid','Paid','Failed','Refunded','COD'].map(status => <option key={status} value={status}>{status}</option>)}</select></label>
+              <label>Status<select value={reportFilters.status} onChange={e => setReportFilters({ ...reportFilters, status: e.target.value })}><option value="">All statuses</option>{['received','accepted','preparing','ready','picked_up','out_for_delivery','delivered','cancelled'].map(status => <option key={status} value={status}>{statusLabel(status)}</option>)}</select></label>
               <button onClick={loadSalesReport}>Apply</button>
               <button className="ghost" onClick={exportSalesCsv}>Export CSV</button>
+              <button className="ghost" onClick={exportSalesPdf}>Export PDF</button>
             </div>
             {salesReport ? (
               <>
@@ -1682,8 +2043,14 @@ export default function AdminPage() {
                     ['Offline Sales', salesReport.summary.offline_sales, true],
                     ['Cash Sales', salesReport.summary.cash_sales, true],
                     ['Counter Digital', salesReport.summary.counter_digital_sales, true],
+                    ['Paid Amount', salesReport.summary.paid_amount, true],
+                    ['Remaining', salesReport.summary.remaining_amount, true],
                     ['Average Order', salesReport.summary.average_order, true],
                     ['Total Discounts', salesReport.summary.total_discounts, true],
+                    ['Completed', salesReport.summary.completed_orders, false],
+                    ['Pending', salesReport.summary.pending_orders, false],
+                    ['Cancelled', salesReport.summary.cancelled_orders, false],
+                    ['Partial Payments', salesReport.summary.partial_payment_orders, false],
                   ].map(([label, value, money]) => <article className="stat-card compact" key={label}><p>{label}</p><h2>{money ? inr(value) : value}</h2></article>)}
                 </div>
                 <div className="report-grid">

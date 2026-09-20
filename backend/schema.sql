@@ -36,6 +36,17 @@ CREATE TABLE IF NOT EXISTS admin_refresh_tokens (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS staff_permissions (
+  user_id BIGINT UNSIGNED NOT NULL,
+  permission_key VARCHAR(80) NOT NULL,
+  is_allowed TINYINT(1) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, permission_key),
+  INDEX idx_staff_permissions_key (permission_key),
+  INDEX idx_staff_permissions_allowed (permission_key, is_allowed),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS categories (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(120) NOT NULL,

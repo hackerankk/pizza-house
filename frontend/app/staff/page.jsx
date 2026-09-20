@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ChevronRight, CreditCard, LogOut, Menu, Minus, Plus, Printer, Search, Trash2, Utensils, X } from 'lucide-react';
+import { ChevronRight, CreditCard, LogOut, Menu, Minus, Plus, Printer, Save, Search, Trash2, Utensils, X } from 'lucide-react';
 import { api, clearToken, inr, openInvoice, productImage, setToken, token } from '../lib';
 
 function optionPrice(option, variantName) {
@@ -54,6 +54,30 @@ function staffSizeLabel(name) {
   if (name === 'M') return 'Medium';
   if (name === 'L') return 'Large';
   return name || 'Regular';
+}
+
+const defaultStaffPermissions = {
+  create_orders: true,
+  view_current_orders: true,
+  confirm_orders: true,
+  mark_order_ready_complete: true,
+  edit_orders: false,
+  view_today_orders: true,
+  view_reports: false
+};
+
+function staffOrderActionLabel(status) {
+  if (status === 'accepted') return 'Confirm';
+  if (status === 'ready') return 'Ready';
+  if (status === 'delivered') return 'Complete';
+  return status.replaceAll('_', ' ');
+}
+
+function nextStaffStatuses(order) {
+  if (order.status === 'received') return ['accepted'];
+  if (order.status === 'accepted') return ['ready'];
+  if (order.status === 'ready') return ['delivered'];
+  return [];
 }
 
 function StaffBogoModal({ unlock, items, categories, onClose, onAdd }) {
@@ -125,6 +149,8 @@ function StaffBogoModal({ unlock, items, categories, onClose, onAdd }) {
 export default function StaffPage() {
   const [login, setLogin] = useState({ email: '', password: '' });
   const [staff, setStaff] = useState(null);
+  const [permissions, setPermissions] = useState(defaultStaffPermissions);
+  const [staffDashboard, setStaffDashboard] = useState({ today: { orders: 0 }, current_orders: [] });
   const [items, setItems] = useState([]);
   const [categories, setCategories] = useState([]);
   const [optionGroups, setOptionGroups] = useState([]);
@@ -153,13 +179,27 @@ export default function StaffPage() {
   const [customer, setCustomer] = useState({ name: '', phone: '', email: '' });
   const [message, setMessage] = useState('');
   const [createdOrder, setCreatedOrder] = useState(null);
+  const [editingOrder, setEditingOrder] = useState(null);
   const [posEnabled, setPosEnabled] = useState(true);
   const [loading, setLoading] = useState(false);
+
+  const loadStaffDashboard = useCallback(async () => {
+    if (!token()) return;
+    try {
+      const data = await api('/staff/dashboard');
+      setStaffDashboard({ today: data.today || { orders: 0 }, current_orders: data.current_orders || [] });
+      setPermissions({ ...defaultStaffPermissions, ...(data.permissions || {}) });
+    } catch (err) {
+      if (!String(err.message || '').toLowerCase().includes('permission')) setMessage(err.message);
+    }
+  }, []);
 
   useEffect(() => {
     if (token()) api('/auth/me').then(data => {
       if (data.user?.role === 'staff') {
         setStaff(data.user);
+        setPermissions({ ...defaultStaffPermissions, ...(data.user.permissions || {}) });
+        loadStaffDashboard();
         api('/staff/offers').then(offerData => setOffers(offerData.offers || [])).catch(() => {});
       }
     }).catch(() => {});
@@ -171,7 +211,14 @@ export default function StaffPage() {
       setActiveBogoOffers(bogo.offers || []);
       setActiveBogoWeekday(bogo.weekday || '');
     }).catch(err => setMessage(err.message));
-  }, []);
+  }, [loadStaffDashboard]);
+
+  useEffect(() => {
+    if (!staff) return undefined;
+    loadStaffDashboard();
+    const timer = setInterval(loadStaffDashboard, 15000);
+    return () => clearInterval(timer);
+  }, [staff, loadStaffDashboard]);
 
   useEffect(() => {
     const handle = setTimeout(() => setDebouncedSearch(search.trim()), 180);
@@ -260,6 +307,8 @@ export default function StaffPage() {
       const data = await api('/auth/staff-login', { method: 'POST', body: JSON.stringify(login) });
       setToken(data.token);
       setStaff(data.user);
+      setPermissions({ ...defaultStaffPermissions, ...(data.user.permissions || {}) });
+      loadStaffDashboard();
       api('/staff/offers').then(offerData => setOffers(offerData.offers || [])).catch(() => {});
     } catch (err) {
       setMessage(err.message);
@@ -290,6 +339,97 @@ export default function StaffPage() {
     addLine({ ...item, key: `${item.id}:${variant?.id || ''}:`, variant_id: variant?.id || null, variant_name: variant?.name || null, option_ids: [], options: [], price: Number(variant?.price ?? item.price), quantity: 1 });
   }
 
+  function resetOrderForm() {
+    setCart([]);
+    setEditingOrder(null);
+    setOrderType('dine_in');
+    setPaymentMethod('cash');
+    setDiscountOpen(false);
+    setDiscountType('none');
+    setFixedDiscount('');
+    setDiscountReason('');
+    setSelectedOfferId('');
+    setCashReceived('');
+    setOnlineReceived('');
+    setTableNumber('');
+    setCustomer({ name: '', phone: '', email: '' });
+    setBogoPicker(null);
+    setModalItem(null);
+    setMobileCartOpen(false);
+  }
+
+  function cartLineFromOrderItem(item) {
+    const product = items.find(row => Number(row.id) === Number(item.menu_item_id));
+    const optionIds = (item.selection_meta?.options || []).map(option => Number(option.id)).filter(Boolean);
+    const key = `edit:${item.id}:${item.menu_item_id}:${item.variant_id || ''}:${optionIds.join('.')}`;
+    return {
+      ...(product || {}),
+      id: Number(item.menu_item_id),
+      key,
+      name: item.name_snapshot,
+      stock: Number(product?.stock || 9999),
+      variant_id: item.variant_id || null,
+      variant_name: item.variant_snapshot || null,
+      option_ids: optionIds,
+      options: item.selection_meta?.options || [],
+      price: Number(item.unit_price || 0),
+      quantity: Math.max(1, Number(item.quantity || 1)),
+      is_bogo_free: Boolean(item.is_bogo_free),
+      bogo_parent_key: item.bogo_parent_key || ''
+    };
+  }
+
+  async function editStaffOrder(order) {
+    if (!permissions.edit_orders) return setMessage('You do not have permission to edit orders.');
+    try {
+      setMessage('');
+      const data = await api(`/staff/orders/${order.id}/edit`);
+      setEditingOrder(data.order);
+      setCreatedOrder(null);
+      setCart((data.items || []).map(cartLineFromOrderItem));
+      setCustomer({ name: data.order.customer_name || '', phone: data.order.customer_phone || '', email: data.order.customer_email || '' });
+      setOrderType(data.order.order_type === 'takeaway' ? 'takeaway' : 'dine_in');
+      setPaymentMethod(data.order.payment_method || 'cash');
+      setCashReceived(data.order.cash_received || '');
+      setOnlineReceived(data.order.online_received || '');
+      setTableNumber(data.order.table_number || '');
+      setDiscountOpen(false);
+      setDiscountType('none');
+      setMessage(`Editing ${data.order.order_number}. Add, remove, or adjust items, then save changes.`);
+    } catch (err) {
+      setMessage(err.message);
+    }
+  }
+
+  async function saveEditedOrder() {
+    if (!editingOrder) return;
+    if (!permissions.edit_orders) return setMessage('You do not have permission to edit orders.');
+    if (!cart.length) return setMessage('Edited order must contain at least one item.');
+    setLoading(true);
+    try {
+      const payload = {
+        items: cart.map(line => ({
+          id: line.id,
+          variant_id: line.variant_id || null,
+          option_ids: line.option_ids || [],
+          quantity: line.quantity,
+          client_key: line.key || '',
+          is_bogo_free: Boolean(line.is_bogo_free),
+          bogo_parent_key: line.bogo_parent_key || ''
+        }))
+      };
+      const data = await api(`/staff/orders/${editingOrder.id}/edit`, { method: 'PUT', body: JSON.stringify(payload) });
+      setCreatedOrder(data.order);
+      resetOrderForm();
+      setMessage('Order updated and totals recalculated.');
+      loadStaffDashboard();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function selectCategory(categoryId) {
     setActiveCategory(categoryId);
     setMobileCategoryOpen(false);
@@ -308,6 +448,7 @@ export default function StaffPage() {
   }
 
   async function createOrder() {
+    if (!permissions.create_orders) return setMessage('You do not have permission to create orders.');
     if (!cart.length) return setMessage('Cart is empty.');
     if (cashAmount < 0 || onlineAmount < 0 || Number.isNaN(cashAmount) || Number.isNaN(onlineAmount)) return setMessage('Enter valid payment amounts.');
     if (paymentMethod === 'cash' && cashAmount <= 0) return setMessage('Enter cash received.');
@@ -337,16 +478,23 @@ export default function StaffPage() {
       };
       const data = await api('/staff/orders', { method: 'POST', headers: { 'X-Idempotency-Key': idempotency }, body: JSON.stringify(body) });
       setCreatedOrder(data.order);
-      setCart([]);
-      setDiscountOpen(false);
-      setDiscountType('none');
-      setFixedDiscount('');
-      setDiscountReason('');
-      setSelectedOfferId('');
+      resetOrderForm();
+      loadStaffDashboard();
     } catch (err) {
       setMessage(err.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function updateStaffOrder(order, status) {
+    try {
+      setMessage('');
+      await api(`/staff/orders/${order.id}`, { method: 'PUT', body: JSON.stringify({ status }) });
+      setMessage(`Order ${order.order_number} updated.`);
+      loadStaffDashboard();
+    } catch (err) {
+      setMessage(err.message);
     }
   }
 
@@ -455,7 +603,7 @@ export default function StaffPage() {
         <div><span>Remaining</span><strong>{inr(remaining)}</strong></div>
         <div><span>Change</span><strong>{inr(change)}</strong></div>
       </div>
-      <button className="full-width staff-place-order" onClick={createOrder} disabled={loading || !cart.length}><CreditCard size={18} /> {loading ? 'Creating...' : 'Place Order'}</button>
+      <button className="full-width staff-place-order" onClick={editingOrder ? saveEditedOrder : createOrder} disabled={loading || !cart.length || (!editingOrder && !permissions.create_orders) || (editingOrder && !permissions.edit_orders)}>{editingOrder ? <Save size={18} /> : <CreditCard size={18} />} {loading ? (editingOrder ? 'Saving...' : 'Creating...') : editingOrder ? (permissions.edit_orders ? 'Save Edited Order' : 'Edit Disabled') : permissions.create_orders ? 'Place Order' : 'Create Order Disabled'}</button>
     </aside>
   );
 
@@ -497,7 +645,36 @@ export default function StaffPage() {
         </div>
       </header>
       {message ? <p className="notice error">{message}</p> : null}
-      {createdOrder ? <section className="staff-success-card"><h2>Order Created Successfully</h2><p><strong>{createdOrder.order_number}</strong></p><p>Subtotal: {inr(createdOrder.subtotal)} · Discount: {inr(createdOrder.discount_amount || 0)} · Total: {inr(createdOrder.total_amount)}</p>{createdOrder.discount_description ? <p>{createdOrder.discount_description}</p> : null}<p>Payment: {createdOrder.payment_method || createdOrder.payment_mode} · {createdOrder.payment_status}</p><p>Cash: {inr(createdOrder.cash_received || 0)} · Online: {inr(createdOrder.online_received || 0)} · Paid: {inr(createdOrder.paid_amount || 0)} · Remaining: {inr(createdOrder.remaining_amount || 0)} · Change: {inr(createdOrder.change_amount || createdOrder.cash_change || 0)}</p><div className="action-row"><button className="ghost" onClick={() => openInvoice(`/staff/orders/${createdOrder.id}/invoice`)}><Printer size={16} /> Generate / Download Bill</button><button onClick={() => setCreatedOrder(null)}>New Order</button></div></section> : null}
+      {createdOrder ? <section className="staff-success-card"><h2>Order Created Successfully</h2><p><strong>{createdOrder.order_number}</strong></p><p>Subtotal: {inr(createdOrder.subtotal)} · Discount: {inr(createdOrder.discount_amount || 0)} · Total: {inr(createdOrder.total_amount)}</p>{createdOrder.discount_description ? <p>{createdOrder.discount_description}</p> : null}<p>Payment: {createdOrder.payment_method || createdOrder.payment_mode} · {createdOrder.payment_status}</p><p>Cash: {inr(createdOrder.cash_received || 0)} · Online: {inr(createdOrder.online_received || 0)} · Paid: {inr(createdOrder.paid_amount || 0)} · Remaining: {inr(createdOrder.remaining_amount || 0)} · Change: {inr(createdOrder.change_amount || createdOrder.cash_change || 0)}</p><div className="action-row"><button className="ghost" onClick={() => openInvoice(`/staff/orders/${createdOrder.id}/invoice`)}><Printer size={16} /> Generate / Download Bill</button><button onClick={() => { setCreatedOrder(null); resetOrderForm(); }}>New Order</button></div></section> : null}
+      <section className="staff-dashboard-strip">
+        {permissions.view_today_orders ? <article className="staff-today-card"><span>Today</span><strong>{staffDashboard.today?.orders || 0}</strong><small>Orders</small></article> : null}
+        {permissions.view_current_orders ? (
+          <article className="staff-current-orders-panel">
+            <div className="staff-section-head"><div><span className="eyebrow">Current Orders</span><h2>Active staff orders</h2></div><button className="ghost" onClick={loadStaffDashboard}>Refresh</button></div>
+            <div className="staff-current-order-list">
+              {(staffDashboard.current_orders || []).length ? staffDashboard.current_orders.map(order => {
+                const next = nextStaffStatuses(order);
+                return (
+                  <div className="staff-current-order-card" key={order.id}>
+                    <div><strong>{order.order_number}</strong><span>{order.customer_name || 'Walk-in customer'} {order.customer_phone ? `· ${order.customer_phone}` : ''}</span></div>
+                    <div><span>{order.order_type === 'dine_in' ? 'Dine-in' : 'Takeaway'} · Staff</span><strong>{inr(order.total_amount)}</strong></div>
+                    <div><span>{order.payment_status}</span><small>Paid {inr(order.paid_amount || 0)} · Remaining {inr(order.remaining_amount || 0)}</small></div>
+                    <div><span>Status</span><strong>{order.status === 'received' ? 'Created' : order.status === 'delivered' ? 'Completed' : order.status.replaceAll('_', ' ')}</strong></div>
+                    <div className="action-row">
+                      {next.includes('accepted') && permissions.confirm_orders ? <button className="ghost" onClick={() => updateStaffOrder(order, 'accepted')}>{staffOrderActionLabel('accepted')}</button> : null}
+                      {next.includes('ready') && permissions.mark_order_ready_complete ? <button className="ghost" onClick={() => updateStaffOrder(order, 'ready')}>{staffOrderActionLabel('ready')}</button> : null}
+                      {next.includes('delivered') && permissions.mark_order_ready_complete ? <button className="ghost" onClick={() => updateStaffOrder(order, 'delivered')}>{staffOrderActionLabel('delivered')}</button> : null}
+                      {permissions.edit_orders ? <button className="ghost" onClick={() => editStaffOrder(order)}><Save size={15} /> Edit Order</button> : null}
+                      <button className="ghost" onClick={() => openInvoice(`/staff/orders/${order.id}/invoice`)}><Printer size={15} /> Bill</button>
+                    </div>
+                  </div>
+                );
+              }) : <p className="small-note">No active staff orders right now.</p>}
+            </div>
+          </article>
+        ) : null}
+      </section>
+      {editingOrder ? <section className="staff-success-card staff-editing-banner"><h2>Editing {editingOrder.order_number}</h2><p>Update products, quantities, sizes, or add-ons in the cart. The backend will recalculate totals, stock, coupons, BOGO, and remaining amount when you save.</p><div className="action-row"><button className="ghost" onClick={resetOrderForm}>Cancel Edit</button></div></section> : null}
       <section className="staff-pos-layout">
         <aside className="staff-category-panel">
           <h2>Categories</h2>
