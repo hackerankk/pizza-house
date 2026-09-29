@@ -209,7 +209,7 @@ CREATE TABLE IF NOT EXISTS promotional_banners (
   subtitle TEXT NULL,
   image_url VARCHAR(500) NOT NULL,
   button_text VARCHAR(80) NULL,
-  destination_type ENUM('none','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
+  destination_type ENUM('none','menu','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
   destination_value VARCHAR(500) NULL,
   display_order INT NOT NULL DEFAULT 0,
   start_at DATETIME NULL,
@@ -242,7 +242,7 @@ CREATE TABLE IF NOT EXISTS promotional_popups (
   image_url VARCHAR(500) NULL,
   offer_text VARCHAR(160) NULL,
   button_text VARCHAR(80) NULL,
-  destination_type ENUM('none','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
+  destination_type ENUM('none','menu','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
   destination_value VARCHAR(500) NULL,
   display_frequency ENUM('session','daily','every_visit') NOT NULL DEFAULT 'session',
   display_order INT NOT NULL DEFAULT 0,
@@ -462,7 +462,12 @@ INSERT INTO settings (setting_key, setting_value) VALUES
 ('customer_login_enabled','1'),
 ('order_schedule','{"monday":{"enabled":"1","open":"11:00","close":"23:00"},"tuesday":{"enabled":"1","open":"11:00","close":"23:00"},"wednesday":{"enabled":"1","open":"11:00","close":"23:00"},"thursday":{"enabled":"1","open":"11:00","close":"23:00"},"friday":{"enabled":"1","open":"11:00","close":"23:00"},"saturday":{"enabled":"1","open":"11:00","close":"23:00"},"sunday":{"enabled":"1","open":"11:00","close":"23:00"}}'),
 ('customer_default_theme','system'),
-('admin_theme_mode','system')
+('admin_theme_mode','system'),
+('admin_new_order_sound_enabled','1'),
+('admin_new_order_sound_tone','classic_bell'),
+('admin_new_order_sound_source','builtin'),
+('admin_new_order_custom_sound_url',''),
+('admin_new_order_custom_sound_name','')
 ON DUPLICATE KEY UPDATE setting_value = setting_value;
 
 INSERT INTO theme_settings (setting_key, setting_value) VALUES

@@ -55,11 +55,11 @@ export default function DeliveryDashboardPage() {
     });
     refreshGeoPermission();
     setGpsState(state => ({ ...state, secureContext: typeof window === 'undefined' ? true : window.isSecureContext }));
-    if (token()) {
-      api('/auth/me').then(data => {
+    if (token('delivery')) {
+      api('/auth/me', { authScope: 'delivery' }).then(data => {
         if (data.user.role === 'delivery_boy') setUser(data.user);
         else setMessage('Please sign in with a delivery boy account.');
-      }).catch(() => clearToken());
+      }).catch(() => clearToken('delivery'));
     }
     return () => {
       stopTracking();
@@ -106,9 +106,9 @@ export default function DeliveryDashboardPage() {
     setLoading(true);
     setMessage('');
     try {
-      const data = await api('/auth/login', { method: 'POST', body: JSON.stringify(login) });
+      const data = await api('/auth/login', { method: 'POST', body: JSON.stringify(login), authScope: 'delivery' });
       if (data.user.role !== 'delivery_boy') throw new Error('This account is not a delivery boy account.');
-      setToken(data.token);
+      setToken(data.token, 'delivery');
       setUser(data.user);
     } catch (err) {
       setMessage(err.message);
@@ -307,7 +307,7 @@ export default function DeliveryDashboardPage() {
 
   function logout() {
     stopTracking();
-    clearToken();
+    clearToken('delivery');
     setUser(null);
     setOrders([]);
   }

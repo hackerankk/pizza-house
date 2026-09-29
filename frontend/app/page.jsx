@@ -7,11 +7,25 @@ import { api, applyTheme, inr, productImage, readCart, saveCart, setThemeMode, s
 
 function destinationHref(item) {
   if (!item || item.destination_type === 'none') return '';
+  if (item.destination_type === 'menu') return '#menu';
   if (item.destination_type === 'custom_url') return item.destination_value || '';
   if (item.destination_type === 'category') return `#category-${item.destination_value}`;
   if (item.destination_type === 'product') return `#product-${item.destination_value}`;
   if (item.destination_type === 'offer') return '#offers';
   return '';
+}
+
+function safeCustomDestination(value = '') {
+  if (!value) return '';
+  try {
+    const url = new URL(value);
+    const localHosts = ['localhost', '127.0.0.1', '0.0.0.0'];
+    const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+    if (localHosts.includes(url.hostname) && !localHosts.includes(currentHost)) return '';
+    return value;
+  } catch {
+    return '';
+  }
 }
 
 function customerStoreStatusLabel(storeStatus) {
@@ -268,7 +282,7 @@ function PromotionMarquee({ messages }) {
   );
 }
 
-function PromoBannerCarousel({ banners }) {
+function PromoBannerCarousel({ banners, onDestination }) {
   const [index, setIndex] = useState(0);
   const touchStartRef = useRef(null);
 
@@ -284,7 +298,8 @@ function PromoBannerCarousel({ banners }) {
 
   if (!banners.length) return null;
   const current = banners[index] || banners[0];
-  const href = destinationHref(current);
+  const rawHref = destinationHref(current);
+  const href = current.destination_type === 'custom_url' ? safeCustomDestination(rawHref) : rawHref;
   const image = productImage(current);
   const previous = () => setIndex(currentIndex => (currentIndex - 1 + banners.length) % banners.length);
   const next = () => setIndex(currentIndex => (currentIndex + 1) % banners.length);
@@ -306,10 +321,11 @@ function PromoBannerCarousel({ banners }) {
       </div>
     </>
   );
+  const isExternalLink = current.destination_type === 'custom_url' && href;
   return (
     <section className="container promo-carousel" aria-label="Promotional banners">
       <div className="promo-banner" onTouchStart={event => { touchStartRef.current = event.touches[0].clientX; }} onTouchEnd={onTouchEnd}>
-        {href ? <a className="promo-banner-link" href={href}>{inner}</a> : <div className="promo-banner-link">{inner}</div>}
+        {isExternalLink ? <a className="promo-banner-link" href={href} rel="noopener noreferrer">{inner}</a> : href ? <button type="button" className="promo-banner-link" onClick={() => onDestination?.(current)}>{inner}</button> : <div className="promo-banner-link">{inner}</div>}
         {banners.length > 1 ? (
           <>
             <button className="promo-arrow previous" onClick={previous} aria-label="Previous promotion">‹</button>
@@ -845,6 +861,88 @@ export default function Home() {
     document.getElementById('menu')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
+  function findProductDestination(value) {
+    const wanted = String(value || '').trim();
+    if (!wanted) return null;
+    return items.find(item => String(item.id) === wanted || String(item.slug || '').toLowerCase() === wanted.toLowerCase()) || null;
+  }
+
+  function openProductDestination(value, { updateHash = true } = {}) {
+    const product = findProductDestination(value);
+    if (!product) {
+      notify('That promoted product is currently unavailable. Showing the full menu instead.', 'warning');
+      document.getElementById('menu')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (updateHash && typeof window !== 'undefined') window.history.replaceState(null, '', '#menu');
+      return;
+    }
+    setActiveCategory(product.category_id);
+    setSearch('');
+    setDebouncedSearch('');
+    setHighlightedProductId(product.id);
+    setModalItem(product);
+    setTimeout(() => document.getElementById(`product-${product.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
+    setTimeout(() => setHighlightedProductId(null), 1800);
+    if (updateHash && typeof window !== 'undefined') window.history.replaceState(null, '', `#product-${product.id}`);
+  }
+
+  function openCategoryDestination(value, { updateHash = true } = {}) {
+    const category = categories.find(row => String(row.id) === String(value) || String(row.slug || '').toLowerCase() === String(value || '').toLowerCase());
+    if (!category) {
+      notify('That promoted category is currently unavailable. Showing the full menu instead.', 'warning');
+      document.getElementById('menu')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (updateHash && typeof window !== 'undefined') window.history.replaceState(null, '', '#menu');
+      return;
+    }
+    selectCategory(category.id);
+    if (updateHash && typeof window !== 'undefined') window.history.replaceState(null, '', `#category-${category.id}`);
+  }
+
+  function handlePromotionDestination(promo) {
+    if (!promo) return;
+    if (promo.destination_type === 'product') return openProductDestination(promo.destination_value);
+    if (promo.destination_type === 'category') return openCategoryDestination(promo.destination_value);
+    if (promo.destination_type === 'menu') {
+      document.getElementById('menu')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (typeof window !== 'undefined') window.history.replaceState(null, '', '#menu');
+      return;
+    }
+    if (promo.destination_type === 'offer') {
+      document.getElementById('offers')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (typeof window !== 'undefined') window.history.replaceState(null, '', '#offers');
+    }
+  }
+
+  useEffect(() => {
+    if (!items.length || typeof window === 'undefined') return;
+    const applyHash = () => {
+      const hash = window.location.hash || '';
+      if (hash.startsWith('#product-')) {
+        const wanted = decodeURIComponent(hash.replace('#product-', ''));
+        const product = items.find(item => String(item.id) === wanted || String(item.slug || '').toLowerCase() === wanted.toLowerCase());
+        if (!product) return;
+        setActiveCategory(product.category_id);
+        setSearch('');
+        setDebouncedSearch('');
+        setHighlightedProductId(product.id);
+        setModalItem(product);
+        setTimeout(() => document.getElementById(`product-${product.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
+        setTimeout(() => setHighlightedProductId(null), 1800);
+      } else if (hash.startsWith('#category-')) {
+        const wanted = decodeURIComponent(hash.replace('#category-', ''));
+        const category = categories.find(row => String(row.id) === wanted || String(row.slug || '').toLowerCase() === wanted.toLowerCase());
+        if (!category) return;
+        setActiveCategory(category.id);
+        setCategoryMoreOpen(false);
+        document.getElementById('menu')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } else if (hash === '#menu') {
+        document.getElementById('menu')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    };
+    applyHash();
+    window.addEventListener('hashchange', applyHash);
+    return () => window.removeEventListener('hashchange', applyHash);
+  }, [items, categories]);
+
   function selectSuggestion(item) {
     setActiveCategory(item.category_id);
     setSearch(item.name);
@@ -947,7 +1045,7 @@ export default function Home() {
         </section>
 
         <PromotionMarquee messages={promotions.marquee} />
-        <PromoBannerCarousel banners={promotions.banners} />
+        <PromoBannerCarousel banners={promotions.banners} onDestination={handlePromotionDestination} />
 
         <div className="container">{message ? <p className={`notice ${messageType}`}>{message}</p> : null}</div>
 

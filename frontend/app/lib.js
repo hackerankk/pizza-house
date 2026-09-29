@@ -1,16 +1,42 @@
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000';
 
-export function token() {
+const tokenKeys = {
+  customer: 'pizza_house_customer_token',
+  admin: 'pizza_house_admin_token',
+  staff: 'pizza_house_staff_token',
+  delivery: 'pizza_house_delivery_token'
+};
+
+function tokenScopeFromPath(path = '', explicitScope = '') {
+  if (explicitScope) return explicitScope;
+  if (path.startsWith('/admin') || path === '/auth/admin-login' || path === '/auth/admin-refresh' || path === '/auth/admin-logout') return 'admin';
+  if (path.startsWith('/staff') || path === '/auth/staff-login') return 'staff';
+  if (path.startsWith('/delivery')) return 'delivery';
+  return 'customer';
+}
+
+function tokenKey(scope = 'customer') {
+  return tokenKeys[scope] || tokenKeys.customer;
+}
+
+export function token(scope = 'customer') {
   if (typeof window === 'undefined') return '';
-  return localStorage.getItem('token') || '';
+  const scoped = localStorage.getItem(tokenKey(scope)) || '';
+  if (scoped) return scoped;
+  return scope === 'customer' ? (localStorage.getItem('token') || '') : '';
 }
 
-export function setToken(value) {
-  localStorage.setItem('token', value);
+export function setToken(value, scope = 'customer') {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(tokenKey(scope), value);
+  if (scope === 'customer') localStorage.setItem('token', value);
 }
 
-export function clearToken() {
-  if (typeof window !== 'undefined') localStorage.removeItem('token');
+export function clearToken(scope = 'customer') {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem(tokenKey(scope));
+    if (scope === 'customer') localStorage.removeItem('token');
+  }
 }
 
 export function rememberGuestOrder(orderId, accessToken) {
@@ -41,10 +67,11 @@ export function orderAccessQuery(orderId, explicitToken = '') {
 }
 
 export async function api(path, options = {}) {
+  const { authScope, ...fetchOptions } = options;
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-  const auth = token();
+  const auth = token(tokenScopeFromPath(path, authScope));
   if (auth) headers.Authorization = `Bearer ${auth}`;
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers, cache: 'no-store', credentials: 'include' });
+  const res = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers, cache: 'no-store', credentials: 'include' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     let message = data.error || 'Request failed';
@@ -63,10 +90,11 @@ export async function api(path, options = {}) {
 }
 
 export async function uploadApi(path, formData, options = {}) {
+  const { authScope, ...fetchOptions } = options;
   const headers = { ...(options.headers || {}) };
-  const auth = token();
+  const auth = token(tokenScopeFromPath(path, authScope));
   if (auth) headers.Authorization = `Bearer ${auth}`;
-  const res = await fetch(`${API_BASE}${path}`, { ...options, method: options.method || 'POST', body: formData, headers, cache: 'no-store', credentials: 'include' });
+  const res = await fetch(`${API_BASE}${path}`, { ...fetchOptions, method: options.method || 'POST', body: formData, headers, cache: 'no-store', credentials: 'include' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = new Error(data.error || 'Upload failed');
@@ -80,40 +108,43 @@ export async function refreshAdminSession() {
   const res = await fetch(`${API_BASE}/auth/admin-refresh`, { method: 'POST', cache: 'no-store', credentials: 'include' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    clearToken();
+    clearToken('admin');
     const err = new Error(data.error || 'Admin session expired');
     err.status = res.status;
     throw err;
   }
-  setToken(data.token);
+  setToken(data.token, 'admin');
   return data;
 }
 
 export async function adminApi(path, options = {}) {
+  const scopedOptions = { ...options, authScope: 'admin' };
   try {
-    return await api(path, options);
+    return await api(path, scopedOptions);
   } catch (err) {
     if (err.status !== 401) throw err;
     await refreshAdminSession();
-    return api(path, options);
+    return api(path, scopedOptions);
   }
 }
 
 export async function adminUploadApi(path, formData, options = {}) {
+  const scopedOptions = { ...options, authScope: 'admin' };
   try {
-    return await uploadApi(path, formData, options);
+    return await uploadApi(path, formData, scopedOptions);
   } catch (err) {
     if (err.status !== 401) throw err;
     await refreshAdminSession();
-    return uploadApi(path, formData, options);
+    return uploadApi(path, formData, scopedOptions);
   }
 }
 
 export async function invoiceBlob(path, options = {}) {
+  const { authScope, ...fetchOptions } = options;
   const headers = { ...(options.headers || {}) };
-  const auth = token();
+  const auth = token(tokenScopeFromPath(path, authScope));
   if (auth) headers.Authorization = `Bearer ${auth}`;
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers, cache: 'no-store', credentials: 'include' });
+  const res = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers, cache: 'no-store', credentials: 'include' });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     const err = new Error(data.error || 'Invoice request failed');
@@ -144,9 +175,9 @@ export async function downloadInvoice(path, filename = 'invoice.pdf') {
 
 export async function adminLogout() {
   try {
-    await api('/auth/admin-logout', { method: 'POST', body: JSON.stringify({}) });
+    await api('/auth/admin-logout', { method: 'POST', body: JSON.stringify({}), authScope: 'admin' });
   } finally {
-    clearToken();
+    clearToken('admin');
   }
 }
 

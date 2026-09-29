@@ -67,15 +67,21 @@ const fieldOptions = {
   customer_login_required: [['0', 'Guest checkout allowed'], ['1', 'Login required']]
   ,
   free_delivery_enabled: [['1', 'Free Delivery ON'], ['0', 'Free Delivery OFF']],
-  destination_type: [['none', 'None'], ['product', 'Product'], ['category', 'Category'], ['offer', 'Offer'], ['custom_url', 'Custom URL']],
+  destination_type: [['none', 'None'], ['menu', 'Menu'], ['product', 'Product'], ['category', 'Category'], ['offer', 'Offer'], ['custom_url', 'Custom URL']],
   display_frequency: [['session', 'Once per session'], ['daily', 'Once per day'], ['every_visit', 'Every visit']]
 };
 
 const prepOptions = [10, 15, 20, 30];
 const weekDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
 const pizzaSizes = [['S', 'Small'], ['M', 'Medium'], ['L', 'Large']];
+const orderNotificationTones = [
+  ['classic_bell', 'Classic Bell'],
+  ['soft_chime', 'Soft Chime'],
+  ['double_beep', 'Double Beep'],
+  ['urgent_ping', 'Urgent Ping']
+];
 const featureControlKeys = ['customer_theme_enabled', 'customer_dark_mode_enabled', 'online_ordering_enabled', 'delivery_enabled', 'takeaway_enabled', 'staff_pos_enabled', 'razorpay_enabled', 'google_maps_enabled', 'guest_checkout_enabled', 'customer_login_enabled'];
-const hiddenGeneralSettings = new Set(['customer_login_required', 'accept_orders', 'force_close_orders', 'order_manual_override', 'order_schedule', 'customer_default_theme', 'admin_theme_mode', ...featureControlKeys]);
+const hiddenGeneralSettings = new Set(['customer_login_required', 'accept_orders', 'force_close_orders', 'order_manual_override', 'order_schedule', 'customer_default_theme', 'admin_theme_mode', 'admin_new_order_sound_enabled', 'admin_new_order_sound_tone', 'admin_new_order_sound_source', 'admin_new_order_custom_sound_url', 'admin_new_order_custom_sound_name', ...featureControlKeys]);
 const staffPermissionLabels = {
   create_orders: ['Can Create Orders', 'Allow staff to submit POS/counter orders.'],
   view_current_orders: ['Can View Current Orders', 'Allow staff to see active orders on POS.'],
@@ -112,6 +118,19 @@ function availabilityModeLabel(availability) {
   return availability.schedule_open ? 'Open by schedule' : 'Closed by schedule';
 }
 
+function uploadUrl(path) {
+  if (!path) return '';
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${API_BASE}/${String(path).replace(/^\/+/, '')}`;
+}
+
+function formatFileSize(bytes) {
+  const size = Number(bytes || 0);
+  if (size <= 0) return '';
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(2)} MB`;
+}
+
 function adminLabel(field) {
   const labels = {
     name: 'Name',
@@ -143,7 +162,9 @@ function adminLabel(field) {
     is_active: 'Status',
     image_url: 'Image',
     low_stock_threshold: 'Low Stock Alert',
-    sort_order: 'Display Order'
+    sort_order: 'Display Order',
+    destination_type: 'CTA Type',
+    destination_value: 'CTA Destination'
   };
   return labels[field] || statusLabel(field);
 }
@@ -648,6 +669,12 @@ export default function AdminPage() {
   const [form, setForm] = useState({});
   const [productImageFile, setProductImageFile] = useState(null);
   const [productImagePreview, setProductImagePreview] = useState('');
+  const [productSearch, setProductSearch] = useState('');
+  const [productSuggestions, setProductSuggestions] = useState([]);
+  const [productSearchOpen, setProductSearchOpen] = useState(false);
+  const [productSearchLoading, setProductSearchLoading] = useState(false);
+  const [productActiveSuggestion, setProductActiveSuggestion] = useState(0);
+  const [productDeleteCandidate, setProductDeleteCandidate] = useState(null);
   const [editing, setEditing] = useState(null);
   const [orders, setOrders] = useState([]);
   const [todayOrders, setTodayOrders] = useState([]);
@@ -690,14 +717,22 @@ export default function AdminPage() {
   const [alertQueue, setAlertQueue] = useState([]);
   const [alertsEnabled, setAlertsEnabled] = useState(false);
   const [soundBlocked, setSoundBlocked] = useState(false);
+  const [notificationSoundFile, setNotificationSoundFile] = useState(null);
+  const [notificationSoundPreview, setNotificationSoundPreview] = useState('');
+  const [notificationSoundError, setNotificationSoundError] = useState('');
   const [acceptingOrder, setAcceptingOrder] = useState(null);
   const [prepMinutes, setPrepMinutes] = useState(15);
   const [customPrepMinutes, setCustomPrepMinutes] = useState('');
   const pollingRef = useRef(false);
   const audioContextRef = useRef(null);
+  const alertAudioRef = useRef(null);
+  const previewAudioRef = useRef(null);
   const soundTimerRef = useRef(null);
   const vibratingRef = useRef(null);
   const activeSoundOrderRef = useRef(null);
+  const alertQueueRef = useRef([]);
+  const alertBaselineReadyRef = useRef(false);
+  const knownPendingOrderIdsRef = useRef(new Set());
 
   const resourceFields = useMemo(() => resources[active] || [], [active]);
   const activeLabel = tabMeta[active]?.[1] || 'Admin';
@@ -716,10 +751,10 @@ export default function AdminPage() {
     api('/settings').then(data => setMapsKey(data.google_maps_api_key || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '')).catch(() => {});
     api('/store/status').then(data => setStoreAvailability(data.store || null)).catch(() => {});
     setAlertsEnabled(localStorage.getItem('pizza_house_admin_alerts_enabled') === '1');
-    if (token()) {
+    if (token('admin')) {
       adminRequest('/auth/me').then(data => {
         if (data.user.role === 'admin') setAdmin(data.user);
-      }).catch(() => clearToken());
+      }).catch(() => clearToken('admin'));
     } else {
       refreshAdminSession().then(data => {
         if (data.user.role === 'admin') setAdmin(data.user);
@@ -728,12 +763,49 @@ export default function AdminPage() {
     return stopAlertEffects;
   }, []);
 
+  useEffect(() => () => {
+    if (notificationSoundPreview) URL.revokeObjectURL(notificationSoundPreview);
+  }, [notificationSoundPreview]);
+
   useEffect(() => {
     if (admin) loadActive();
   }, [active, admin]);
 
   useEffect(() => {
+    if (!admin || active !== 'products') return undefined;
+    const query = productSearch.trim();
+    if (query.length < 2) {
+      setProductSuggestions([]);
+      setProductSearchOpen(false);
+      setProductSearchLoading(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setProductSearchLoading(true);
+    const timer = setTimeout(() => {
+      adminRequest(`/admin/products/search?${new URLSearchParams({ q: query, limit: '8', include_inactive: '1' })}`)
+        .then(data => {
+          if (cancelled) return;
+          setProductSuggestions(data.items || []);
+          setProductActiveSuggestion(0);
+          setProductSearchOpen(true);
+        })
+        .catch(err => {
+          if (!cancelled) setMessage(err.message);
+        })
+        .finally(() => {
+          if (!cancelled) setProductSearchLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [admin, active, productSearch]);
+
+  useEffect(() => {
     if (!admin) return;
+    adminRequest('/admin/settings').then(data => setSettings(data.settings || {})).catch(() => {});
     pollOrdersForAlerts();
     const timer = setInterval(pollOrdersForAlerts, 5000);
     return () => clearInterval(timer);
@@ -752,7 +824,7 @@ export default function AdminPage() {
     setMessage('');
     try {
       const data = await api('/auth/admin-login', { method: 'POST', body: JSON.stringify(login) });
-      setToken(data.token);
+      setToken(data.token, 'admin');
       setAdmin(data.user);
       api('/store/status').then(statusData => setStoreAvailability(statusData.store || null)).catch(() => {});
       setMessage('Welcome back.');
@@ -765,12 +837,11 @@ export default function AdminPage() {
 
   async function logout() {
     stopAlertEffects();
-    await adminLogout().catch(() => clearToken());
+    await adminLogout().catch(() => clearToken('admin'));
     setAdmin(null);
     setStats(null);
     setMessage('');
-    setAlertQueue([]);
-    setNewOrderAlert(null);
+    setOrderAlertQueue([]);
   }
 
   async function loadActive() {
@@ -779,7 +850,7 @@ export default function AdminPage() {
       else if (resources[active]) {
         const data = await adminRequest(`/admin/${active}`);
         setItems(data.items || []);
-        if (['products', 'offers'].includes(active)) {
+        if (['products', 'offers', 'promotional-banners', 'promotional-popups'].includes(active)) {
           const [productsData, categoriesData] = await Promise.all([
             active === 'products' ? Promise.resolve(data) : adminRequest('/admin/products'),
             adminRequest('/admin/categories')
@@ -808,7 +879,14 @@ export default function AdminPage() {
         setStaff(staffData.staff || []);
       }
       else if (active === 'payments') setPayments((await adminRequest('/admin/payments')).payments);
-      else if (active === 'notifications') setNotifications((await adminRequest('/admin/notifications')).notifications);
+      else if (active === 'notifications') {
+        const [notificationsData, settingsData] = await Promise.all([
+          adminRequest('/admin/notifications'),
+          adminRequest('/admin/settings')
+        ]);
+        setNotifications(notificationsData.notifications || []);
+        setSettings(settingsData.settings || {});
+      }
       else if (active === 'settings' || active === 'feature-controls') setSettings((await adminRequest('/admin/settings')).settings);
       else if (active === 'order-availability') {
         const [data, settingsData] = await Promise.all([adminRequest('/admin/settings/order-availability'), adminRequest('/admin/settings')]);
@@ -847,7 +925,59 @@ export default function AdminPage() {
     }
   }
 
-  function playOrderAlertSound() {
+  function orderToneSteps(tone) {
+    const tones = {
+      soft_chime: [
+        { frequency: 660, start: 0, duration: 0.22, type: 'sine', volume: 0.22 },
+        { frequency: 990, start: 0.18, duration: 0.32, type: 'sine', volume: 0.18 }
+      ],
+      double_beep: [
+        { frequency: 760, start: 0, duration: 0.16, type: 'square', volume: 0.24 },
+        { frequency: 760, start: 0.26, duration: 0.16, type: 'square', volume: 0.24 }
+      ],
+      urgent_ping: [
+        { frequency: 1040, start: 0, duration: 0.18, type: 'triangle', volume: 0.28 },
+        { frequency: 880, start: 0.16, duration: 0.2, type: 'triangle', volume: 0.24 },
+        { frequency: 1040, start: 0.36, duration: 0.18, type: 'triangle', volume: 0.28 }
+      ],
+      classic_bell: [
+        { frequency: 880, start: 0, duration: 0.24, type: 'square', volume: 0.28 },
+        { frequency: 660, start: 0.24, duration: 0.32, type: 'square', volume: 0.2 }
+      ]
+    };
+    return tones[tone] || tones.classic_bell;
+  }
+
+  function selectedNotificationSoundUrl() {
+    if ((settings.admin_new_order_sound_source || 'builtin') !== 'custom') return '';
+    return notificationSoundPreview || uploadUrl(settings.admin_new_order_custom_sound_url || '');
+  }
+
+  function playCustomNotificationSound(url, audioRef = alertAudioRef) {
+    if (!url) return false;
+    try {
+      const audio = audioRef.current || new Audio();
+      audioRef.current = audio;
+      if (audio.src !== url) audio.src = url;
+      audio.preload = 'auto';
+      audio.pause();
+      audio.currentTime = 0;
+      const playResult = audio.play();
+      if (playResult?.then) {
+        playResult.then(() => setSoundBlocked(false)).catch(() => setSoundBlocked(true));
+      } else {
+        setSoundBlocked(false);
+      }
+      return true;
+    } catch {
+      setSoundBlocked(true);
+      return false;
+    }
+  }
+
+  function playOrderAlertSound(tone = settings.admin_new_order_sound_tone || 'classic_bell') {
+    const customUrl = selectedNotificationSoundUrl();
+    if (customUrl) return playCustomNotificationSound(customUrl, alertAudioRef);
     try {
       const AudioContext = window.AudioContext || window.webkitAudioContext;
       if (!AudioContext) {
@@ -860,17 +990,21 @@ export default function AdminPage() {
         setSoundBlocked(true);
         return false;
       }
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.type = 'square';
-      oscillator.frequency.setValueAtTime(880, context.currentTime);
-      gain.gain.setValueAtTime(0.001, context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.32, context.currentTime + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.75);
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start();
-      oscillator.stop(context.currentTime + 0.8);
+      orderToneSteps(tone).forEach(step => {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        const start = context.currentTime + step.start;
+        const stop = start + step.duration;
+        oscillator.type = step.type;
+        oscillator.frequency.setValueAtTime(step.frequency, start);
+        gain.gain.setValueAtTime(0.001, start);
+        gain.gain.exponentialRampToValueAtTime(step.volume, start + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, stop);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(start);
+        oscillator.stop(stop + 0.02);
+      });
       setSoundBlocked(false);
       return true;
     } catch {
@@ -893,7 +1027,7 @@ export default function AdminPage() {
       localStorage.setItem('pizza_house_admin_alerts_enabled', '1');
       setAlertsEnabled(true);
       setSoundBlocked(false);
-      playOrderAlertSound();
+      playOrderAlertSound(settings.admin_new_order_sound_tone || 'classic_bell');
     } catch {
       setSoundBlocked(true);
     }
@@ -902,6 +1036,10 @@ export default function AdminPage() {
   function stopAlertEffects() {
     if (soundTimerRef.current) clearInterval(soundTimerRef.current);
     if (vibratingRef.current) clearInterval(vibratingRef.current);
+    if (alertAudioRef.current) {
+      alertAudioRef.current.pause();
+      alertAudioRef.current.currentTime = 0;
+    }
     soundTimerRef.current = null;
     vibratingRef.current = null;
     activeSoundOrderRef.current = null;
@@ -913,11 +1051,14 @@ export default function AdminPage() {
     stopAlertEffects();
     activeSoundOrderRef.current = order.id;
     showBrowserOrderNotification(order);
-    if (alertsEnabled) {
-      const played = playOrderAlertSound();
-      if (played) soundTimerRef.current = setInterval(playOrderAlertSound, 2600);
+    if ((settings.admin_new_order_sound_enabled || '1') === '1') {
+      if (alertsEnabled) {
+        playOrderAlertSound(settings.admin_new_order_sound_tone || 'classic_bell');
+        soundTimerRef.current = setInterval(() => playOrderAlertSound(settings.admin_new_order_sound_tone || 'classic_bell'), 3500);
+      }
+      else setSoundBlocked(true);
     } else {
-      setSoundBlocked(true);
+      setSoundBlocked(false);
     }
     if ('vibrate' in navigator) {
       navigator.vibrate([700, 180, 700]);
@@ -933,6 +1074,12 @@ export default function AdminPage() {
     });
   }
 
+  function setOrderAlertQueue(nextQueue) {
+    alertQueueRef.current = nextQueue;
+    setAlertQueue(nextQueue);
+    setNewOrderAlert(nextQueue[0] || null);
+  }
+
   async function pollOrdersForAlerts() {
     if (pollingRef.current) return;
     pollingRef.current = true;
@@ -941,8 +1088,21 @@ export default function AdminPage() {
       const nextOrders = data.orders || [];
       setOrders(nextOrders);
       const pendingAlerts = nextOrders.filter(isAlertableOrder).sort((a, b) => Number(a.id) - Number(b.id));
-      setAlertQueue(pendingAlerts);
-      setNewOrderAlert(pendingAlerts[0] || null);
+      const pendingIds = new Set(pendingAlerts.map(order => Number(order.id)));
+      if (!alertBaselineReadyRef.current) {
+        knownPendingOrderIdsRef.current = pendingIds;
+        alertBaselineReadyRef.current = true;
+        setOrderAlertQueue([]);
+        return;
+      }
+      const nextQueue = pendingAlerts.filter(order => {
+        const id = Number(order.id);
+        const alreadyQueued = alertQueueRef.current.some(alert => Number(alert.id) === id);
+        const isNew = !knownPendingOrderIdsRef.current.has(id);
+        return alreadyQueued || isNew;
+      });
+      pendingIds.forEach(id => knownPendingOrderIdsRef.current.add(id));
+      setOrderAlertQueue(nextQueue);
     } catch {
       // Keep polling quiet; visible API errors still show through normal tab loading.
     } finally {
@@ -1020,8 +1180,79 @@ export default function AdminPage() {
     setMessage('');
   }
 
-  async function deleteResource(id) {
+  function selectProductSuggestion(product) {
+    setProductSearch(product.name || '');
+    setProductSearchOpen(false);
+    setProductSuggestions([]);
+    setItems(current => [product, ...current.filter(item => Number(item.id) !== Number(product.id))]);
+    editResource(product);
+  }
+
+  function productSuggestionLabel(name) {
+    const query = productSearch.trim();
+    if (!query) return name;
+    const tokens = query.split(/\s+/).filter(Boolean).sort((a, b) => b.length - a.length);
+    if (!tokens.length) return name;
+    const pattern = new RegExp(`(${tokens.map(token => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'ig');
+    return String(name || '').split(pattern).map((part, index) => (
+      tokens.some(token => part.toLowerCase() === token.toLowerCase()) ? <mark key={`${part}-${index}`}>{part}</mark> : <span key={`${part}-${index}`}>{part}</span>
+    ));
+  }
+
+  function handleProductSearchKey(event) {
+    if (!productSearchOpen || !productSuggestions.length) return;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setProductActiveSuggestion(index => Math.min(index + 1, productSuggestions.length - 1));
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setProductActiveSuggestion(index => Math.max(index - 1, 0));
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      selectProductSuggestion(productSuggestions[productActiveSuggestion]);
+    }
+    if (event.key === 'Escape') {
+      setProductSearchOpen(false);
+    }
+  }
+
+  async function confirmProductDelete() {
+    if (!productDeleteCandidate) return;
     try {
+      await adminRequest(`/admin/products/${productDeleteCandidate.id}`, { method: 'DELETE' });
+      setMessage(`${productDeleteCandidate.name} removed from customer and staff menus.`);
+      setProductDeleteCandidate(null);
+      setEditing(null);
+      setForm({});
+      clearProductImageSelection();
+      loadActive();
+    } catch (err) {
+      setMessage(err.message);
+    }
+  }
+
+  async function restoreProduct(product) {
+    try {
+      await adminRequest(`/admin/products/${product.id}`, { method: 'PUT', body: JSON.stringify({ is_active: 1 }) });
+      setMessage(`${product.name} restored.`);
+      loadActive();
+    } catch (err) {
+      setMessage(err.message);
+    }
+  }
+
+  async function deleteResource(itemOrId) {
+    if (active === 'products') {
+      const product = typeof itemOrId === 'object' ? itemOrId : items.find(item => Number(item.id) === Number(itemOrId));
+      if (product) {
+        setProductDeleteCandidate(product);
+        return;
+      }
+    }
+    try {
+      const id = typeof itemOrId === 'object' ? itemOrId.id : itemOrId;
       await adminRequest(`/admin/${active}/${id}`, { method: 'DELETE' });
       setMessage('Deleted.');
       loadActive();
@@ -1140,8 +1371,7 @@ export default function AdminPage() {
     if (order.source === 'staff_offline') {
       await updateOrder(order, { status: 'accepted' });
       const nextQueue = alertQueue.filter(item => item.id !== order.id);
-      setAlertQueue(nextQueue);
-      setNewOrderAlert(nextQueue[0] || null);
+      setOrderAlertQueue(nextQueue);
       pollOrdersForAlerts();
       return;
     }
@@ -1159,8 +1389,7 @@ export default function AdminPage() {
     await updateOrder(order, { status: 'accepted', preparation_minutes: minutes });
     setAcceptingOrder(null);
     const nextQueue = alertQueue.filter(item => item.id !== order.id);
-    setAlertQueue(nextQueue);
-    setNewOrderAlert(nextQueue[0] || null);
+    setOrderAlertQueue(nextQueue);
     pollOrdersForAlerts();
   }
 
@@ -1256,6 +1485,102 @@ export default function AdminPage() {
     }
   }
 
+  async function saveNotificationSoundSettings() {
+    try {
+      let customSoundUrl = settings.admin_new_order_custom_sound_url || '';
+      let customSoundName = settings.admin_new_order_custom_sound_name || '';
+      if (notificationSoundFile) {
+        const uploadForm = new FormData();
+        uploadForm.append('audio', notificationSoundFile);
+        uploadForm.append('name', notificationSoundFile.name || 'new-order-alert');
+        const uploaded = await adminUploadRequest('/admin/notification-sound', uploadForm);
+        customSoundUrl = uploaded.sound_url || '';
+        customSoundName = uploaded.sound_name || notificationSoundFile.name || '';
+      }
+      if ((settings.admin_new_order_sound_source || 'builtin') === 'custom' && !customSoundUrl) {
+        setNotificationSoundError('Upload a custom MP3, WAV or OGG sound before saving custom sound mode.');
+        return;
+      }
+      const payload = {
+        admin_new_order_sound_enabled: settings.admin_new_order_sound_enabled || '1',
+        admin_new_order_sound_tone: settings.admin_new_order_sound_tone || 'classic_bell',
+        admin_new_order_sound_source: settings.admin_new_order_sound_source || 'builtin',
+        admin_new_order_custom_sound_url: customSoundUrl,
+        admin_new_order_custom_sound_name: customSoundName
+      };
+      const data = await adminRequest('/admin/settings', { method: 'PUT', body: JSON.stringify(payload) });
+      setSettings(data.settings);
+      if (notificationSoundPreview) URL.revokeObjectURL(notificationSoundPreview);
+      setNotificationSoundFile(null);
+      setNotificationSoundPreview('');
+      setNotificationSoundError('');
+      setMessage('New order notification sound settings saved.');
+    } catch (err) {
+      setMessage(err.message);
+    }
+  }
+
+  async function previewNotificationTone() {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (AudioContext) {
+        const context = audioContextRef.current || new AudioContext();
+        audioContextRef.current = context;
+        if (context.state === 'suspended') await context.resume();
+      }
+      localStorage.setItem('pizza_house_admin_alerts_enabled', '1');
+      setAlertsEnabled(true);
+      const customUrl = selectedNotificationSoundUrl();
+      if (customUrl) playCustomNotificationSound(customUrl, previewAudioRef);
+      else playOrderAlertSound(settings.admin_new_order_sound_tone || 'classic_bell');
+    } catch {
+      setSoundBlocked(true);
+    }
+  }
+
+  function selectNotificationSound(file) {
+    if (!file) return;
+    const allowedTypes = ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave', 'audio/ogg', 'application/ogg'];
+    const allowedExtensions = ['mp3', 'wav', 'ogg'];
+    const extension = file.name.split('.').pop()?.toLowerCase() || '';
+    if (!allowedExtensions.includes(extension) || (file.type && !allowedTypes.includes(file.type))) {
+      setNotificationSoundError('Only MP3, WAV or OGG notification sounds are allowed.');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setNotificationSoundError('Notification sound must be 5MB or smaller.');
+      return;
+    }
+    if (notificationSoundPreview) URL.revokeObjectURL(notificationSoundPreview);
+    setNotificationSoundFile(file);
+    setNotificationSoundPreview(URL.createObjectURL(file));
+    setNotificationSoundError('');
+    setSettings(current => ({
+      ...current,
+      admin_new_order_sound_source: 'custom',
+      admin_new_order_custom_sound_name: file.name
+    }));
+  }
+
+  function clearSelectedNotificationSound() {
+    if (notificationSoundPreview) URL.revokeObjectURL(notificationSoundPreview);
+    setNotificationSoundFile(null);
+    setNotificationSoundPreview('');
+    setNotificationSoundError('');
+  }
+
+  async function removeCustomNotificationSound() {
+    try {
+      stopAlertEffects();
+      const data = await adminRequest('/admin/notification-sound', { method: 'DELETE' });
+      clearSelectedNotificationSound();
+      setSettings(data.settings);
+      setMessage('Custom notification sound removed. Built-in sound is active.');
+    } catch (err) {
+      setMessage(err.message);
+    }
+  }
+
   function changeAdminThemeMode(mode) {
     setAdminThemeMode(mode);
     setThemeMode(mode, 'pizza_house_admin_theme_mode');
@@ -1290,7 +1615,7 @@ export default function AdminPage() {
   async function exportSalesCsv() {
     try {
       const params = new URLSearchParams({ ...reportFilters, format: 'csv' });
-      const res = await fetch(`${API_BASE}/admin/reports/sales?${params}`, { headers: { Authorization: `Bearer ${token()}` }, credentials: 'include', cache: 'no-store' });
+      const res = await fetch(`${API_BASE}/admin/reports/sales?${params}`, { headers: { Authorization: `Bearer ${token('admin')}` }, credentials: 'include', cache: 'no-store' });
       if (!res.ok) throw new Error('Unable to export sales report.');
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -1309,7 +1634,7 @@ export default function AdminPage() {
   async function exportSalesPdf() {
     try {
       const params = new URLSearchParams({ ...reportFilters, format: 'pdf' });
-      const res = await fetch(`${API_BASE}/admin/reports/sales?${params}`, { headers: { Authorization: `Bearer ${token()}` }, credentials: 'include', cache: 'no-store' });
+      const res = await fetch(`${API_BASE}/admin/reports/sales?${params}`, { headers: { Authorization: `Bearer ${token('admin')}` }, credentials: 'include', cache: 'no-store' });
       if (!res.ok) throw new Error('Unable to export sales PDF.');
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -1447,6 +1772,39 @@ export default function AdminPage() {
   }
 
   function adminField(field, value, onChange) {
+    if (field === 'destination_type' && ['promotional-banners', 'promotional-popups'].includes(active)) {
+      return (
+        <select value={value || 'none'} onChange={e => setForm({ ...form, destination_type: e.target.value, destination_value: '' })}>
+          {fieldOptions.destination_type.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+        </select>
+      );
+    }
+    if (field === 'destination_value' && ['promotional-banners', 'promotional-popups'].includes(active)) {
+      const destinationType = form.destination_type || 'none';
+      if (destinationType === 'product') {
+        return (
+          <select value={value || ''} onChange={e => onChange(e.target.value)}>
+            <option value="">Select product</option>
+            {catalogProducts.map(product => <option key={product.id} value={product.id}>{product.name}</option>)}
+          </select>
+        );
+      }
+      if (destinationType === 'category') {
+        return (
+          <select value={value || ''} onChange={e => onChange(e.target.value)}>
+            <option value="">Select category</option>
+            {catalogCategories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}
+          </select>
+        );
+      }
+      if (destinationType === 'custom_url') {
+        return <input type="url" placeholder="https://example.com/offer" value={value || ''} onChange={e => onChange(e.target.value)} />;
+      }
+      if (destinationType === 'offer') {
+        return <input placeholder="#offers" value={value || ''} onChange={e => onChange(e.target.value)} />;
+      }
+      return <input value="" disabled placeholder={destinationType === 'menu' ? 'Menu destination uses the main menu automatically' : 'No destination value needed'} />;
+    }
     const options = fieldOptions[field];
     if (options) {
       return <select value={value || ''} onChange={e => onChange(e.target.value)}><option value="">Select</option>{options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}</select>;
@@ -1524,6 +1882,18 @@ export default function AdminPage() {
       payload.free_delivery_enabled = String(payload.free_delivery_enabled ?? '1') === '1' ? 1 : 0;
       payload.is_active = String(payload.is_active ?? '1') === '1' ? 1 : 0;
       payload.priority = payload.priority || '100';
+    }
+    if (['promotional-banners', 'promotional-popups'].includes(active)) {
+      payload.destination_type = payload.destination_type || 'none';
+      if (['none', 'menu'].includes(payload.destination_type)) {
+        payload.destination_value = '';
+      }
+      if (payload.destination_type === 'custom_url' && /https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?/i.test(payload.destination_value || '')) {
+        throw new Error('Promotion destination cannot point to localhost.');
+      }
+      if (['product', 'category'].includes(payload.destination_type) && !payload.destination_value) {
+        throw new Error(`Select a ${payload.destination_type} destination.`);
+      }
     }
     return payload;
   }
@@ -1625,6 +1995,22 @@ export default function AdminPage() {
           onAccept={() => acceptOrder(acceptingOrder)}
         />
       ) : null}
+      {productDeleteCandidate ? (
+        <div className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true">
+          <section className="admin-order-modal product-delete-modal">
+            <div className="modal-icon danger"><Trash2 size={24} /></div>
+            <div>
+              <span className="eyebrow">Delete Product?</span>
+              <h2>{productDeleteCandidate.name}</h2>
+              <p>This product will no longer be available for customers or new staff orders. Historical orders will keep their saved item snapshots.</p>
+            </div>
+            <div className="action-row">
+              <button className="ghost" onClick={() => setProductDeleteCandidate(null)}>Cancel</button>
+              <button className="danger" onClick={confirmProductDelete}>Delete Product</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       {(orderDetails || orderDetailsLoading) ? (
         <OrderDetailsModal
           data={orderDetails}
@@ -1686,7 +2072,7 @@ export default function AdminPage() {
               <option value="dark">Dark</option>
               <option value="system">System</option>
             </select>
-            {(!alertsEnabled || soundBlocked) ? <button className="ghost" onClick={enableOrderAlerts}><Bell size={16} /> Enable Order Alerts</button> : null}
+            {(settings.admin_new_order_sound_enabled || '1') === '1' && (!alertsEnabled || soundBlocked) ? <button className="ghost" onClick={enableOrderAlerts}><Bell size={16} /> Enable Order Alerts</button> : null}
             <div className="admin-profile">{admin.name?.[0] || 'A'}<span>{admin.email}</span></div>
           </div>
         </header>
@@ -1704,7 +2090,7 @@ export default function AdminPage() {
         )}
 
         {resources[active] && active !== 'delivery-slabs' && (
-          <div className="admin-content-grid">
+          <div className={active === 'products' ? 'admin-content-grid products-management-grid' : 'admin-content-grid'}>
             <section className="panel">
               <div className="panel-heading"><h2>{editing ? 'Edit' : active === 'products' ? '+ Add Product' : active === 'offers' ? '+ Create Offer' : 'Add'} {active === 'products' || active === 'offers' ? '' : active.replace('-', ' ')}</h2><p>Changes save through the existing PHP admin API.</p></div>
               <div className="form-grid">
@@ -1755,17 +2141,52 @@ export default function AdminPage() {
             <section className="panel table-panel">
               <div className="panel-heading"><h2>{active === 'products' ? 'Products' : active === 'offers' ? 'Offers' : active.replace('-', ' ')}</h2></div>
               {active === 'products' ? (
-                <div className="admin-product-list">
-                  {items.map((item, index) => <article className="admin-product-row" key={item.id}>
-                    <img className="table-thumb large" src={productImage(item, index)} alt="" />
-                    <div><strong>{item.name}</strong><p>{item.description || 'No description'}</p></div>
-                    <div><span>Category</span><strong>{categoryName(item.category_id)}</strong></div>
-                    <div><span>Price</span><strong>{inr(productStartingPrice(item))}</strong></div>
-                    <div><span>Stock</span><strong>{Number(item.stock || 0) <= Number(item.low_stock_threshold || 0) ? 'Low stock' : `${item.stock} available`}</strong></div>
-                    <StatusBadge tone={Number(item.is_active) === 1 ? 'success' : 'danger'}>{readableStatus(item.is_active)}</StatusBadge>
-                    <div className="action-row"><button className="ghost" onClick={() => editResource(item)}>Edit</button><button className="ghost" onClick={() => { const copy = {}; resourceFields.forEach(field => { copy[field] = field === 'name' ? `${item.name} Copy` : item[field] ?? ''; }); setForm(copy); setEditing(null); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>Duplicate</button><button className="ghost danger" onClick={() => deleteResource(item.id)}>Delete</button></div>
-                  </article>)}
-                </div>
+                <>
+                  <div className="admin-product-search">
+                    <div className="search-box">
+                      <Search size={18} />
+                      <input
+                        value={productSearch}
+                        onChange={event => setProductSearch(event.target.value)}
+                        onFocus={() => productSuggestions.length && setProductSearchOpen(true)}
+                        onKeyDown={handleProductSearchKey}
+                        placeholder="Search products..."
+                        aria-label="Search admin products"
+                      />
+                      {productSearch ? <button className="icon-button tiny" type="button" onClick={() => { setProductSearch(''); setProductSuggestions([]); setProductSearchOpen(false); }}><X size={15} /></button> : null}
+                    </div>
+                    {productSearchOpen ? (
+                      <div className="admin-product-suggestions" role="listbox">
+                        {productSearchLoading ? <p className="small-note">Searching...</p> : null}
+                        {!productSearchLoading && productSuggestions.length ? productSuggestions.map((product, index) => (
+                          <button
+                            key={product.id}
+                            className={index === productActiveSuggestion ? 'active' : ''}
+                            onMouseEnter={() => setProductActiveSuggestion(index)}
+                            onMouseDown={event => { event.preventDefault(); selectProductSuggestion(product); }}
+                            role="option"
+                            aria-selected={index === productActiveSuggestion}
+                          >
+                            <Search size={15} />
+                            <span><strong>{productSuggestionLabel(product.name)}</strong><small>{product.category_name || categoryName(product.category_id)} · {Number(product.is_active) === 1 ? 'Active' : 'Inactive'}</small></span>
+                          </button>
+                        )) : null}
+                        {!productSearchLoading && !productSuggestions.length ? <p className="small-note">No matching products found.</p> : null}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="admin-product-list">
+                    {items.map((item, index) => <article className={Number(item.is_active) === 1 ? 'admin-product-row' : 'admin-product-row inactive'} key={item.id}>
+                      <img className="table-thumb large" src={productImage(item, index)} alt="" />
+                      <div><strong>{item.name}</strong><p>{item.description || 'No description'}</p></div>
+                      <div><span>Category</span><strong>{categoryName(item.category_id)}</strong></div>
+                      <div><span>Price</span><strong>{inr(productStartingPrice(item))}</strong></div>
+                      <div><span>Stock</span><strong>{Number(item.stock || 0) <= Number(item.low_stock_threshold || 0) ? 'Low stock' : `${item.stock} available`}</strong></div>
+                      <StatusBadge tone={Number(item.is_active) === 1 ? 'success' : 'danger'}>{Number(item.is_active) === 1 ? 'Active' : 'Inactive'}</StatusBadge>
+                      <div className="action-row"><button className="ghost" onClick={() => editResource(item)}>Edit</button><button className="ghost" onClick={() => { const copy = {}; resourceFields.forEach(field => { copy[field] = field === 'name' ? `${item.name} Copy` : item[field] ?? ''; }); copy.is_active = 1; setForm(copy); setEditing(null); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>Duplicate</button>{Number(item.is_active) === 1 ? <button className="ghost danger" onClick={() => deleteResource(item)}>Delete</button> : <button className="ghost" onClick={() => restoreProduct(item)}>Restore</button>}</div>
+                    </article>)}
+                  </div>
+                </>
               ) : active === 'offers' ? (
                 <div className="admin-offer-card-grid">
                   {items.map(item => {
@@ -2068,7 +2489,59 @@ export default function AdminPage() {
         )}
 
         {active === 'payments' && <DataTable rows={payments} columns={['order_number','amount','status','razorpay_order_id','razorpay_payment_id','created_at']} moneyCols={['amount']} />}
-        {active === 'notifications' && <DataTable rows={notifications} columns={['channel','recipient','message','status','created_at']} />}
+        {active === 'notifications' && (
+          <div className="admin-content-grid">
+            <section className="panel">
+              <div className="panel-heading">
+                <h2>New Order Sound</h2>
+                <p>Control the sound that repeats for a new pending order until it is accepted or moved ahead.</p>
+              </div>
+              <ToggleSwitch
+                checked={(settings.admin_new_order_sound_enabled || '1') === '1'}
+                onChange={checked => setSettings({ ...settings, admin_new_order_sound_enabled: checked ? '1' : '0' })}
+                label="Enable Sound"
+                description="The visual new-order popup stays active even when sound is disabled."
+              />
+              <div className="form-grid">
+                <label>Sound Source
+                  <select value={settings.admin_new_order_sound_source || 'builtin'} onChange={e => setSettings({ ...settings, admin_new_order_sound_source: e.target.value })}>
+                    <option value="builtin">Built-in Sound</option>
+                    <option value="custom">Custom Sound Upload</option>
+                  </select>
+                </label>
+                {(settings.admin_new_order_sound_source || 'builtin') === 'builtin' ? (
+                  <label>Built-in Sound
+                    <select value={settings.admin_new_order_sound_tone || 'classic_bell'} onChange={e => setSettings({ ...settings, admin_new_order_sound_tone: e.target.value })}>
+                      {orderNotificationTones.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </select>
+                  </label>
+                ) : null}
+              </div>
+              {(settings.admin_new_order_sound_source || 'builtin') === 'custom' ? (
+                <NotificationSoundUpload
+                  file={notificationSoundFile}
+                  preview={notificationSoundPreview}
+                  value={settings.admin_new_order_custom_sound_url || ''}
+                  name={settings.admin_new_order_custom_sound_name || ''}
+                  error={notificationSoundError}
+                  onSelect={selectNotificationSound}
+                  onClear={clearSelectedNotificationSound}
+                  onRemoveSaved={settings.admin_new_order_custom_sound_url ? removeCustomNotificationSound : null}
+                />
+              ) : null}
+              <div className="action-row">
+                <button className="ghost" onClick={previewNotificationTone}><Bell size={16} /> Preview</button>
+                <button onClick={saveNotificationSoundSettings}><Save size={16} /> Save</button>
+                {!alertsEnabled || soundBlocked ? <button className="ghost" onClick={enableOrderAlerts}>Enable Browser Audio</button> : null}
+              </div>
+              {soundBlocked ? <p className="small-note">Browser audio is blocked until the admin interacts with this dashboard. Use Preview or Enable Browser Audio once.</p> : null}
+            </section>
+            <section className="panel table-panel">
+              <div className="panel-heading"><h2>Notification History</h2></div>
+              <DataTable rows={notifications} columns={['channel','recipient','message','status','created_at']} />
+            </section>
+          </div>
+        )}
 
         {active === 'settings' && (
           <section className="panel">
@@ -2261,6 +2734,64 @@ export default function AdminPage() {
         )}
       </section>
     </main>
+  );
+}
+
+function NotificationSoundUpload({ file, preview, value, name, error, onSelect, onClear, onRemoveSaved }) {
+  const inputRef = useRef(null);
+  const [dragging, setDragging] = useState(false);
+  const currentUrl = preview || uploadUrl(value);
+  const selectedName = file?.name || name || (value ? value.split('/').pop() : '');
+  const selectedSize = file ? formatFileSize(file.size) : '';
+
+  function handleDrop(event) {
+    event.preventDefault();
+    setDragging(false);
+    onSelect(event.dataTransfer.files?.[0]);
+  }
+
+  return (
+    <div className="upload-field notification-sound-field">
+      <span>Custom Sound Upload</span>
+      <div
+        className={dragging ? 'image-dropzone sound-dropzone dragging' : 'image-dropzone sound-dropzone'}
+        onDragOver={event => { event.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={handleDrop}
+      >
+        {currentUrl ? (
+          <div className="sound-preview-card">
+            <Bell size={34} />
+            <div>
+              <strong>{selectedName || 'Selected notification sound'}</strong>
+              <p>{selectedSize || value}</p>
+              <audio controls src={currentUrl} preload="metadata" />
+              <div className="action-row">
+                <button type="button" className="ghost" onClick={() => inputRef.current?.click()}><Upload size={16} /> Replace Sound</button>
+                {file ? <button type="button" className="ghost" onClick={onClear}>Clear Selection</button> : null}
+                {onRemoveSaved ? <button type="button" className="ghost danger" onClick={onRemoveSaved}>Remove Custom Sound</button> : null}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="dropzone-empty">
+            <Bell size={34} />
+            <strong>Drag & Drop sound here</strong>
+            <span>or</span>
+            <button type="button" className="ghost" onClick={() => inputRef.current?.click()}><Upload size={16} /> Choose from Device</button>
+            <small>MP3, WAV or OGG - Max 5MB</small>
+          </div>
+        )}
+        <input
+          ref={inputRef}
+          type="file"
+          accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/ogg,.mp3,.wav,.ogg"
+          onChange={event => onSelect(event.target.files?.[0])}
+          hidden
+        />
+      </div>
+      {error ? <p className="notice danger">{error}</p> : null}
+    </div>
   );
 }
 

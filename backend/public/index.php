@@ -407,7 +407,7 @@ function ensure_order_management_schema(): void {
         subtitle TEXT NULL,
         image_url VARCHAR(500) NOT NULL,
         button_text VARCHAR(80) NULL,
-        destination_type ENUM('none','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
+        destination_type ENUM('none','menu','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
         destination_value VARCHAR(500) NULL,
         display_order INT NOT NULL DEFAULT 0,
         start_at DATETIME NULL,
@@ -438,7 +438,7 @@ function ensure_order_management_schema(): void {
         image_url VARCHAR(500) NULL,
         offer_text VARCHAR(160) NULL,
         button_text VARCHAR(80) NULL,
-        destination_type ENUM('none','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
+        destination_type ENUM('none','menu','product','category','offer','custom_url') NOT NULL DEFAULT 'none',
         destination_value VARCHAR(500) NULL,
         display_frequency ENUM('session','daily','every_visit') NOT NULL DEFAULT 'session',
         display_order INT NOT NULL DEFAULT 0,
@@ -450,6 +450,12 @@ function ensure_order_management_schema(): void {
         INDEX idx_promotional_popups_active (is_active, display_order),
         INDEX idx_promotional_popups_dates (start_at, end_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    try {
+        $pdo->exec("ALTER TABLE promotional_banners MODIFY destination_type ENUM('none','menu','product','category','offer','custom_url') NOT NULL DEFAULT 'none'");
+        $pdo->exec("ALTER TABLE promotional_popups MODIFY destination_type ENUM('none','menu','product','category','offer','custom_url') NOT NULL DEFAULT 'none'");
+    } catch (Throwable $e) {
+        // Older MySQL variants may already have compatible enum definitions; validation below still protects writes.
+    }
     $pdo->prepare('INSERT IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?)')->execute(['customer_login_required', '0']);
     foreach ([
         'razorpay_key_id' => '',
@@ -472,6 +478,11 @@ function ensure_order_management_schema(): void {
         'order_schedule' => default_order_schedule_json(),
         'customer_default_theme' => 'system',
         'admin_theme_mode' => 'system',
+        'admin_new_order_sound_enabled' => '1',
+        'admin_new_order_sound_tone' => 'classic_bell',
+        'admin_new_order_sound_source' => 'builtin',
+        'admin_new_order_custom_sound_url' => '',
+        'admin_new_order_custom_sound_name' => '',
     ] as $key => $value) {
         $pdo->prepare('INSERT IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?)')->execute([$key, $value]);
     }
@@ -1262,12 +1273,61 @@ function uploaded_category_image_path(array $file, string $baseName = 'category'
     return uploaded_image_path($file, $baseName, 'uploads/categories', 'Category');
 }
 
+function uploaded_notification_sound_path(array $file, string $baseName = 'new-order-alert'): string {
+    if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+        $errors = [
+            UPLOAD_ERR_INI_SIZE => 'Uploaded sound exceeds the server upload limit',
+            UPLOAD_ERR_FORM_SIZE => 'Uploaded sound exceeds the form upload limit',
+            UPLOAD_ERR_PARTIAL => 'Sound upload was incomplete',
+            UPLOAD_ERR_NO_FILE => 'Notification sound file is required',
+        ];
+        json_response(['error' => $errors[$file['error']] ?? 'Sound upload failed'], 422);
+    }
+    if ((int)($file['size'] ?? 0) <= 0 || (int)$file['size'] > 5 * 1024 * 1024) {
+        json_response(['error' => 'Notification sound must be 5MB or smaller'], 422);
+    }
+    $original = (string)($file['name'] ?? '');
+    $extension = strtolower(pathinfo($original, PATHINFO_EXTENSION));
+    $allowedExtensions = ['mp3' => 'mp3', 'wav' => 'wav', 'ogg' => 'ogg'];
+    if (!isset($allowedExtensions[$extension])) {
+        json_response(['error' => 'Only MP3, WAV or OGG notification sounds are allowed'], 422);
+    }
+    $tmp = (string)($file['tmp_name'] ?? '');
+    if ($tmp === '' || !is_uploaded_file($tmp)) {
+        json_response(['error' => 'Invalid uploaded sound'], 422);
+    }
+    $finfo = new finfo(FILEINFO_MIME_TYPE);
+    $mime = $finfo->file($tmp) ?: '';
+    $allowedMimes = [
+        'audio/mpeg' => 'mp3',
+        'audio/mp3' => 'mp3',
+        'audio/wav' => 'wav',
+        'audio/x-wav' => 'wav',
+        'audio/wave' => 'wav',
+        'audio/vnd.wave' => 'wav',
+        'audio/ogg' => 'ogg',
+        'application/ogg' => 'ogg',
+    ];
+    if (!isset($allowedMimes[$mime]) || $allowedMimes[$mime] !== $allowedExtensions[$extension]) {
+        json_response(['error' => 'Uploaded file content does not match an allowed sound type'], 422);
+    }
+    $safeBase = slugify($baseName);
+    $filename = $safeBase . '-' . bin2hex(random_bytes(8)) . '.' . $allowedMimes[$mime];
+    $relative = 'uploads/notifications/' . $filename;
+    $target = public_upload_path($relative);
+    if (!move_uploaded_file($tmp, $target)) {
+        json_response(['error' => 'Unable to save uploaded notification sound'], 500);
+    }
+    @chmod($target, 0644);
+    return $relative;
+}
+
 function delete_local_upload(?string $relativePath): void {
     if (!$relativePath) {
         return;
     }
     $relativePath = ltrim(str_replace(['\\', "\0"], ['/', ''], $relativePath), '/');
-    if (!str_starts_with($relativePath, 'uploads/products/') && !str_starts_with($relativePath, 'uploads/promotions/') && !str_starts_with($relativePath, 'uploads/categories/')) {
+    if (!str_starts_with($relativePath, 'uploads/products/') && !str_starts_with($relativePath, 'uploads/promotions/') && !str_starts_with($relativePath, 'uploads/categories/') && !str_starts_with($relativePath, 'uploads/notifications/')) {
         return;
     }
     $root = realpath(__DIR__);
@@ -1279,7 +1339,8 @@ function delete_local_upload(?string $relativePath): void {
     $products = $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'products' . DIRECTORY_SEPARATOR;
     $promotions = $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'promotions' . DIRECTORY_SEPARATOR;
     $categories = $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'categories' . DIRECTORY_SEPARATOR;
-    if ($resolved && (str_starts_with($resolved, $products) || str_starts_with($resolved, $promotions) || str_starts_with($resolved, $categories)) && is_file($resolved)) {
+    $notifications = $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'notifications' . DIRECTORY_SEPARATOR;
+    if ($resolved && (str_starts_with($resolved, $products) || str_starts_with($resolved, $promotions) || str_starts_with($resolved, $categories) || str_starts_with($resolved, $notifications)) && is_file($resolved)) {
         @unlink($resolved);
     }
 }
@@ -1963,6 +2024,47 @@ function normalized_edit_items(array $items): array {
     }, $items);
 }
 
+function staff_payment_state(string $paymentMethod, float $total, $cashInput = 0, $onlineInput = 0): array {
+    if (!in_array($paymentMethod, ['cash', 'online', 'split'], true)) {
+        json_response(['error' => 'Invalid staff payment method'], 422);
+    }
+    $total = money(max($total, 0));
+    if ($paymentMethod === 'cash') {
+        $cashReceived = $total;
+        $onlineReceived = 0.0;
+    } elseif ($paymentMethod === 'online') {
+        $cashReceived = 0.0;
+        $onlineReceived = $total;
+    } else {
+        if (!valid_decimal($cashInput) || !valid_decimal($onlineInput)) {
+            json_response(['error' => 'Payment amounts must be valid numbers'], 422);
+        }
+        $cashReceived = money((float)$cashInput);
+        $onlineReceived = money((float)$onlineInput);
+        if ($cashReceived < 0 || $onlineReceived < 0) {
+            json_response(['error' => 'Payment amounts cannot be negative'], 422);
+        }
+    }
+    $totalReceived = money($cashReceived + $onlineReceived);
+    $changeAmount = money(max($totalReceived - $total, 0));
+    $paidAmount = money(min($totalReceived, $total));
+    $remainingAmount = money(max($total - $totalReceived, 0));
+    $netCash = money(max($cashReceived - $changeAmount, 0));
+    $onlinePaid = money(min($onlineReceived, max($paidAmount - $netCash, 0)));
+    return [
+        'cash_received' => $cashReceived,
+        'online_received' => $onlineReceived,
+        'total_received' => $totalReceived,
+        'change' => $changeAmount,
+        'paid' => $paidAmount,
+        'remaining' => $remainingAmount,
+        'status' => $remainingAmount > 0 ? 'Partially Paid' : 'Paid',
+        'paid_at' => $paidAmount > 0 ? date('Y-m-d H:i:s') : null,
+        'net_cash' => $netCash,
+        'online_paid' => $onlinePaid,
+    ];
+}
+
 function payment_state_after_order_edit(array $order, float $total): array {
     $paymentMode = (string)($order['payment_mode'] ?? '');
     $paymentMethod = (string)($order['payment_method'] ?? '');
@@ -1972,9 +2074,7 @@ function payment_state_after_order_edit(array $order, float $total): array {
     $paid = (float)($order['paid_amount'] ?? 0);
 
     if (($order['source'] ?? '') === 'staff_offline') {
-        $totalReceived = money($cashReceived + $onlineReceived);
-        $change = money(max($cashReceived - max($total - $onlineReceived, 0), 0));
-        $paid = money(min(max($totalReceived - $change, 0), $total));
+        return staff_payment_state($paymentMethod ?: 'cash', $total, $cashReceived, $onlineReceived);
     }
 
     if ($paymentMode === 'cod' || $paymentMethod === 'cod' || ($order['payment_status'] ?? '') === 'COD') {
@@ -1986,7 +2086,7 @@ function payment_state_after_order_edit(array $order, float $total): array {
     return ['paid' => money(min($paid, $total)), 'remaining' => $remaining, 'status' => $status, 'change' => $change];
 }
 
-function apply_order_item_edit(array $order, array $items, int $actorId, string $actorLabel): array {
+function apply_order_item_edit(array $order, array $items, int $actorId, string $actorLabel, ?array $paymentInput = null): array {
     if (in_array($order['status'] ?? '', ['out_for_delivery', 'delivered', 'cancelled'], true)) {
         json_response(['error' => 'Orders already out for delivery, delivered, or cancelled cannot be edited'], 422);
     }
@@ -2028,7 +2128,19 @@ function apply_order_item_edit(array $order, array $items, int $actorId, string 
         $lng = $lockedOrder['longitude'] !== null ? (float)$lockedOrder['longitude'] : null;
         $calc = calculate_cart($items, $couponCode, $lockedOrder['user_id'] ? (int)$lockedOrder['user_id'] : null, $lat, $lng, (string)$lockedOrder['order_type']);
         enforce_coupon_limit_locked($calc['coupon'], $lockedOrder['user_id'] ? (int)$lockedOrder['user_id'] : null);
-        $payment = payment_state_after_order_edit($lockedOrder, (float)$calc['total']);
+        $paymentOrder = $lockedOrder;
+        if (($lockedOrder['source'] ?? '') === 'staff_offline' && is_array($paymentInput)) {
+            $paymentMethod = (string)($paymentInput['payment_method'] ?? ($lockedOrder['payment_method'] ?? 'cash'));
+            if (!in_array($paymentMethod, ['cash', 'online', 'split'], true)) {
+                throw new ApiException('Invalid staff payment method', 422);
+            }
+            $paymentOrder['payment_method'] = $paymentMethod;
+            if ($paymentMethod === 'split') {
+                $paymentOrder['cash_received'] = $paymentInput['cash_received'] ?? ($lockedOrder['cash_received'] ?? 0);
+                $paymentOrder['online_received'] = $paymentInput['online_received'] ?? ($lockedOrder['online_received'] ?? 0);
+            }
+        }
+        $payment = payment_state_after_order_edit($paymentOrder, (float)$calc['total']);
 
         $pdo->prepare('DELETE FROM order_items WHERE order_id=?')->execute([$lockedOrder['id']]);
         $itemInsert = $pdo->prepare('INSERT INTO order_items (order_id, menu_item_id, variant_id, name_snapshot, variant_snapshot, options_snapshot, unit_price, quantity, free_quantity, line_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
@@ -2057,7 +2169,7 @@ function apply_order_item_edit(array $order, array $items, int $actorId, string 
             $pdo->prepare('INSERT INTO coupon_redemptions (coupon_id, user_id, order_id) VALUES (?, ?, ?)')->execute([$calc['coupon']['id'], $lockedOrder['user_id'] ?? null, $lockedOrder['id']]);
         }
 
-        $pdo->prepare('UPDATE orders SET subtotal=?, discount_amount=?, discount_type=?, discount_description=?, delivery_charge=?, total_amount=?, coupon_id=?, distance_km=?, paid_amount=?, remaining_amount=?, payment_status=?, cash_change=?, change_amount=? WHERE id=?')
+        $pdo->prepare('UPDATE orders SET subtotal=?, discount_amount=?, discount_type=?, discount_description=?, delivery_charge=?, total_amount=?, coupon_id=?, distance_km=?, payment_method=?, cash_received=?, online_received=?, total_received=?, paid_amount=?, remaining_amount=?, payment_status=?, cash_change=?, change_amount=?, paid_at=? WHERE id=?')
             ->execute([
                 $calc['subtotal'],
                 $calc['discount'],
@@ -2067,13 +2179,27 @@ function apply_order_item_edit(array $order, array $items, int $actorId, string 
                 $calc['total'],
                 $calc['coupon']['id'] ?? null,
                 $calc['delivery']['distance_km'],
+                $paymentOrder['payment_method'] ?? $lockedOrder['payment_method'],
+                $payment['cash_received'] ?? $lockedOrder['cash_received'],
+                $payment['online_received'] ?? $lockedOrder['online_received'],
+                $payment['total_received'] ?? $lockedOrder['total_received'],
                 $payment['paid'],
                 $payment['remaining'],
                 $payment['status'],
                 $payment['change'],
                 $payment['change'],
+                $payment['paid_at'] ?? $lockedOrder['paid_at'],
                 $lockedOrder['id'],
             ]);
+        if (($lockedOrder['source'] ?? '') === 'staff_offline') {
+            $pdo->prepare("DELETE FROM payments WHERE order_id=? AND method IN ('cash','counter_online')")->execute([$lockedOrder['id']]);
+            if (($payment['net_cash'] ?? 0) > 0) {
+                $pdo->prepare('INSERT INTO payments (order_id, amount, status, method) VALUES (?, ?, ?, ?)')->execute([$lockedOrder['id'], $payment['net_cash'], 'verified', 'cash']);
+            }
+            if (($payment['online_paid'] ?? 0) > 0) {
+                $pdo->prepare('INSERT INTO payments (order_id, amount, status, method) VALUES (?, ?, ?, ?)')->execute([$lockedOrder['id'], $payment['online_paid'], 'verified', 'counter_online']);
+            }
+        }
         $pdo->prepare('INSERT INTO order_status_history (order_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)')->execute([$lockedOrder['id'], $lockedOrder['status'], $lockedOrder['status'], $actorId]);
         $pdo->commit();
     } catch (ApiException $e) {
@@ -2289,11 +2415,23 @@ function validate_setting_value(string $key, string $value): void {
     if ($key === 'partial_payment_type' && !in_array($value, ['percent', 'fixed'], true)) {
         json_response(['error' => 'Partial payment type must be percent or fixed'], 422);
     }
-    if (in_array($key, ['partial_payment_enabled','cod_enabled','full_payment_enabled','customer_login_required','accept_orders','force_close_orders','customer_theme_enabled','customer_dark_mode_enabled','online_ordering_enabled','delivery_enabled','takeaway_enabled','guest_checkout_enabled','customer_login_enabled','staff_pos_enabled','razorpay_enabled','google_maps_enabled'], true) && !is_truthy_setting($value)) {
+    if (in_array($key, ['partial_payment_enabled','cod_enabled','full_payment_enabled','customer_login_required','accept_orders','force_close_orders','customer_theme_enabled','customer_dark_mode_enabled','online_ordering_enabled','delivery_enabled','takeaway_enabled','guest_checkout_enabled','customer_login_enabled','staff_pos_enabled','razorpay_enabled','google_maps_enabled','admin_new_order_sound_enabled'], true) && !is_truthy_setting($value)) {
         json_response(['error' => "$key must be 0 or 1"], 422);
     }
     if (in_array($key, ['customer_default_theme','admin_theme_mode'], true) && !in_array($value, ['light','dark','system'], true)) {
         json_response(['error' => "$key must be light, dark or system"], 422);
+    }
+    if ($key === 'admin_new_order_sound_tone' && !in_array($value, ['classic_bell', 'soft_chime', 'double_beep', 'urgent_ping'], true)) {
+        json_response(['error' => 'Invalid new order notification tone'], 422);
+    }
+    if ($key === 'admin_new_order_sound_source' && !in_array($value, ['builtin', 'custom'], true)) {
+        json_response(['error' => 'Invalid new order notification sound source'], 422);
+    }
+    if ($key === 'admin_new_order_custom_sound_url' && $value !== '' && !preg_match('#^uploads/notifications/[A-Za-z0-9._-]+\.(mp3|wav|ogg)$#i', $value)) {
+        json_response(['error' => 'Invalid custom notification sound path'], 422);
+    }
+    if ($key === 'admin_new_order_custom_sound_name' && strlen($value) > 180) {
+        json_response(['error' => 'Custom notification sound name is too long'], 422);
     }
     if ($key === 'partial_payment_value' && (float)$value < 0) {
         json_response(['error' => 'Partial payment value cannot be negative'], 422);
@@ -2358,7 +2496,7 @@ function save_product_size_prices(int $productId, array $prices): void {
     }
 }
 
-function validate_admin_resource(string $name, array $payload): void {
+function validate_admin_resource(string $name, array &$payload): void {
     if ($name === 'products') {
         foreach (['price','stock','low_stock_threshold'] as $field) {
             if (isset($payload[$field]) && !valid_decimal($payload[$field])) json_response(['error' => "Invalid $field"], 422);
@@ -2408,11 +2546,34 @@ function validate_admin_resource(string $name, array $payload): void {
         }
     }
     if (in_array($name, ['promotional-banners', 'promotional-popups'], true)) {
-        if (isset($payload['destination_type']) && !in_array($payload['destination_type'], ['none','product','category','offer','custom_url'], true)) {
+        if (isset($payload['destination_type']) && !in_array($payload['destination_type'], ['none','menu','product','category','offer','custom_url'], true)) {
             json_response(['error' => 'Invalid destination type'], 422);
         }
-        if (($payload['destination_type'] ?? 'none') === 'custom_url' && !empty($payload['destination_value']) && !filter_var($payload['destination_value'], FILTER_VALIDATE_URL)) {
-            json_response(['error' => 'Custom destination must be a valid URL'], 422);
+        $destinationType = (string)($payload['destination_type'] ?? 'none');
+        $destinationValue = trim((string)($payload['destination_value'] ?? ''));
+        if (in_array($destinationType, ['none', 'menu'], true)) {
+            $payload['destination_value'] = null;
+        }
+        if ($destinationType === 'product') {
+            if ($destinationValue === '' || !ctype_digit($destinationValue)) json_response(['error' => 'Select a valid promotional product'], 422);
+            $check = db()->prepare('SELECT id FROM menu_items WHERE id=? AND is_active=1 LIMIT 1');
+            $check->execute([(int)$destinationValue]);
+            if (!$check->fetch()) json_response(['error' => 'Selected promotional product is not active'], 422);
+        }
+        if ($destinationType === 'category') {
+            if ($destinationValue === '' || !ctype_digit($destinationValue)) json_response(['error' => 'Select a valid promotional category'], 422);
+            $check = db()->prepare('SELECT id FROM categories WHERE id=? AND is_active=1 LIMIT 1');
+            $check->execute([(int)$destinationValue]);
+            if (!$check->fetch()) json_response(['error' => 'Selected promotional category is not active'], 422);
+        }
+        if ($destinationType === 'custom_url' && $destinationValue !== '') {
+            if (!filter_var($destinationValue, FILTER_VALIDATE_URL)) {
+                json_response(['error' => 'Custom destination must be a valid URL'], 422);
+            }
+            $host = strtolower((string)(parse_url($destinationValue, PHP_URL_HOST) ?: ''));
+            if (in_array($host, ['localhost', '127.0.0.1', '0.0.0.0'], true)) {
+                json_response(['error' => 'Custom destination cannot point to localhost'], 422);
+            }
         }
         if (isset($payload['image_url']) && $payload['image_url'] !== '' && !preg_match('#^(uploads/promotions/|https?://)#i', (string)$payload['image_url'])) {
             json_response(['error' => 'Invalid promotion image path'], 422);
@@ -2588,6 +2749,27 @@ if ($path === '/auth/me' && $method === 'GET') {
         $payloadUser['permissions'] = staff_permissions((int)$user['id']);
     }
     json_response(['user' => $payloadUser]);
+}
+
+if ($path === '/auth/debug' && $method === 'GET') {
+    if (env('APP_ENV', 'production') !== 'local') {
+        json_response(['error' => 'Not found', 'path' => $path], 404);
+    }
+    $user = current_user(false);
+    $payload = [
+        'environment' => 'local',
+        'authenticated' => (bool)$user,
+        'token_source' => bearer_token() ? 'bearer' : 'none',
+    ];
+    if ($user) {
+        $payload['user_id'] = (int)$user['id'];
+        $payload['role'] = $user['role'];
+        $payload['is_active'] = (int)$user['is_active'] === 1;
+        if (($user['role'] ?? '') === 'staff') {
+            $payload['permissions'] = staff_permissions((int)$user['id']);
+        }
+    }
+    json_response($payload);
 }
 
 if ($path === '/auth/logout' && $method === 'POST') {
@@ -2964,23 +3146,16 @@ if ($path === '/staff/orders' && $method === 'POST') {
     $discountTypes = array_filter([$calc['discount_type'] ?? null, $staffDiscount['type'] ?? null]);
     $discountDescription = implode('; ', array_filter([$calc['discount_description'] ?? null, $staffDiscount['description'] ?? null]));
     $orderTotal = money(max((float)$calc['subtotal'] - $totalDiscount, 0));
-    $cashReceived = in_array($paymentMethod, ['cash', 'split'], true) ? ($data['cash_received'] ?? 0) : 0;
-    $onlineReceived = in_array($paymentMethod, ['online', 'split'], true) ? ($data['online_received'] ?? 0) : 0;
-    if (!valid_decimal($cashReceived) || !valid_decimal($onlineReceived)) json_response(['error' => 'Payment amounts must be valid numbers'], 422);
-    $cashReceived = money((float)$cashReceived);
-    $onlineReceived = money((float)$onlineReceived);
-    if ($cashReceived < 0 || $onlineReceived < 0) json_response(['error' => 'Payment amounts cannot be negative'], 422);
-    if ($paymentMethod === 'cash' && $cashReceived <= 0) json_response(['error' => 'Cash received is required'], 422);
-    if ($paymentMethod === 'online' && $onlineReceived <= 0) json_response(['error' => 'Online received amount is required'], 422);
-    if ($paymentMethod === 'split' && ($cashReceived <= 0 || $onlineReceived <= 0)) json_response(['error' => 'Split payment requires both cash and online received amounts'], 422);
-    $totalReceived = money($cashReceived + $onlineReceived);
-    $cashDueAfterOnline = max($orderTotal - $onlineReceived, 0);
-    $changeAmount = money(max($cashReceived - $cashDueAfterOnline, 0));
-    $paidAmount = money(min($totalReceived - $changeAmount, $orderTotal));
-    $remainingAmount = money(max($orderTotal - $paidAmount, 0));
-    $paymentStatus = $remainingAmount > 0 ? 'Partially Paid' : 'Paid';
+    $payment = staff_payment_state($paymentMethod, $orderTotal, $data['cash_received'] ?? 0, $data['online_received'] ?? 0);
+    $cashReceived = $payment['cash_received'];
+    $onlineReceived = $payment['online_received'];
+    $totalReceived = $payment['total_received'];
+    $changeAmount = $payment['change'];
+    $paidAmount = $payment['paid'];
+    $remainingAmount = $payment['remaining'];
+    $paymentStatus = $payment['status'];
     $paymentMode = 'cash';
-    $paidAt = $paidAmount > 0 ? date('Y-m-d H:i:s') : null;
+    $paidAt = $payment['paid_at'];
     $customerName = trim((string)($data['customer_name'] ?? ''));
     $customerPhone = trim((string)($data['customer_phone'] ?? ''));
     $customerEmail = strtolower(trim((string)($data['customer_email'] ?? '')));
@@ -3008,12 +3183,11 @@ if ($path === '/staff/orders' && $method === 'POST') {
             $pdo->prepare('INSERT INTO coupon_redemptions (coupon_id, user_id, order_id) VALUES (?, NULL, ?)')->execute([$calc['coupon']['id'], $orderId]);
         }
         $pdo->prepare('INSERT INTO order_status_history (order_id, new_status, changed_by) VALUES (?, ?, ?)')->execute([$orderId, 'received', $staff['id']]);
-        $netCash = money(max($cashReceived - $changeAmount, 0));
-        if ($netCash > 0) {
-            $pdo->prepare('INSERT INTO payments (order_id, amount, status, method) VALUES (?, ?, ?, ?)')->execute([$orderId, $netCash, 'verified', 'cash']);
+        if ($payment['net_cash'] > 0) {
+            $pdo->prepare('INSERT INTO payments (order_id, amount, status, method) VALUES (?, ?, ?, ?)')->execute([$orderId, $payment['net_cash'], 'verified', 'cash']);
         }
-        if ($onlineReceived > 0) {
-            $pdo->prepare('INSERT INTO payments (order_id, amount, status, method) VALUES (?, ?, ?, ?)')->execute([$orderId, $onlineReceived, 'verified', 'counter_online']);
+        if ($payment['online_paid'] > 0) {
+            $pdo->prepare('INSERT INTO payments (order_id, amount, status, method) VALUES (?, ?, ?, ?)')->execute([$orderId, $payment['online_paid'], 'verified', 'counter_online']);
         }
         $pdo->commit();
     } catch (ApiException $e) {
@@ -3071,7 +3245,7 @@ if (preg_match('#^/staff/orders/(\d+)/edit$#', $path, $m)) {
         json_response(editable_order_payload($order));
     }
     if ($method === 'PUT') {
-        json_response(apply_order_item_edit($order, is_array($data['items'] ?? null) ? $data['items'] : [], (int)$staff['id'], 'staff'));
+        json_response(apply_order_item_edit($order, is_array($data['items'] ?? null) ? $data['items'] : [], (int)$staff['id'], 'staff', $data));
     }
 }
 
@@ -3502,6 +3676,30 @@ if (str_starts_with($path, '/admin')) {
         $imagePath = uploaded_category_image_path($_FILES['image'], (string)($_POST['name'] ?? 'category'));
         json_response(['image_url' => $imagePath, 'url' => rtrim(env('APP_URL', ''), '/') . '/' . $imagePath], 201);
     }
+    if ($path === '/admin/notification-sound' && $method === 'POST') {
+        if (empty($_FILES['audio']) || !is_array($_FILES['audio'])) {
+            json_response(['error' => 'Notification sound file is required'], 422);
+        }
+        $soundPath = uploaded_notification_sound_path($_FILES['audio'], (string)($_POST['name'] ?? 'new-order-alert'));
+        json_response([
+            'sound_url' => $soundPath,
+            'sound_name' => basename((string)($_FILES['audio']['name'] ?? 'notification-sound')),
+            'url' => rtrim(env('APP_URL', ''), '/') . '/' . $soundPath,
+        ], 201);
+    }
+    if ($path === '/admin/notification-sound' && $method === 'DELETE') {
+        $s = settings();
+        delete_local_upload($s['admin_new_order_custom_sound_url'] ?? '');
+        $stmt = db()->prepare('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)');
+        foreach ([
+            'admin_new_order_sound_source' => 'builtin',
+            'admin_new_order_custom_sound_url' => '',
+            'admin_new_order_custom_sound_name' => '',
+        ] as $key => $value) {
+            $stmt->execute([$key, $value]);
+        }
+        json_response(['settings' => sanitized_settings(settings())]);
+    }
     $resources = [
         'categories' => ['table' => 'categories', 'fields' => ['name','slug','description','image_url','sort_order','is_active']],
         'products' => ['table' => 'menu_items', 'fields' => ['category_id','name','slug','description','price','stock','low_stock_threshold','image_url','is_active']],
@@ -3512,6 +3710,51 @@ if (str_starts_with($path, '/admin')) {
         'promotional-marquee' => ['table' => 'promotional_marquee', 'fields' => ['message','link','display_order','start_at','end_at','is_active']],
         'promotional-popups' => ['table' => 'promotional_popups', 'fields' => ['title','description','image_url','offer_text','button_text','destination_type','destination_value','display_frequency','display_order','start_at','end_at','is_active']],
     ];
+    if ($path === '/admin/products/search' && $method === 'GET') {
+        $query = trim((string)($_GET['q'] ?? ''));
+        $limit = max(1, min(20, (int)($_GET['limit'] ?? 8)));
+        $includeInactive = (string)($_GET['include_inactive'] ?? '1') === '1';
+        if (strlen($query) < 2) {
+            json_response(['items' => []]);
+        }
+        $tokens = array_values(array_filter(preg_split('/\s+/', strtolower($query)), fn($token) => strlen($token) >= 1));
+        $where = [];
+        $params = [];
+        foreach ($tokens as $token) {
+            $where[] = "(LOWER(mi.name) LIKE ? OR LOWER(mi.slug) LIKE ? OR LOWER(COALESCE(mi.description,'')) LIKE ? OR LOWER(COALESCE(c.name,'')) LIKE ?)";
+            $like = '%' . $token . '%';
+            array_push($params, $like, $like, $like, $like);
+        }
+        if (!$includeInactive) {
+            $where[] = 'mi.is_active=1';
+        }
+        $sql = "SELECT mi.*, c.name AS category_name,
+            CASE
+                WHEN LOWER(mi.name)=LOWER(?) THEN 0
+                WHEN LOWER(mi.name) LIKE LOWER(?) THEN 1
+                WHEN LOWER(mi.name) LIKE LOWER(?) THEN 2
+                ELSE 3
+            END AS match_rank
+            FROM menu_items mi
+            LEFT JOIN categories c ON c.id=mi.category_id
+            WHERE " . implode(' AND ', $where) . "
+            ORDER BY match_rank ASC, mi.is_active DESC, mi.name ASC
+            LIMIT $limit";
+        array_unshift($params, $query, $query . '%', '%' . $query . '%');
+        $stmt = db()->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll();
+        if ($rows) {
+            $ids = array_column($rows, 'id');
+            $variantsStmt = db()->prepare('SELECT * FROM menu_item_variants WHERE menu_item_id IN (' . implode(',', array_fill(0, count($ids), '?')) . ') ORDER BY sort_order,id');
+            $variantsStmt->execute($ids);
+            $byProduct = [];
+            foreach ($variantsStmt->fetchAll() as $variant) $byProduct[(int)$variant['menu_item_id']][] = $variant;
+            foreach ($rows as &$row) $row['variants'] = $byProduct[(int)$row['id']] ?? [];
+            unset($row);
+        }
+        json_response(['items' => $rows]);
+    }
     if ($path === '/admin/delivery-slabs/calculate' && $method === 'POST') {
         foreach (['order_amount', 'distance_km'] as $field) {
             if (!isset($data[$field]) || !valid_decimal($data[$field])) json_response(['error' => "Invalid $field"], 422);
@@ -3596,6 +3839,14 @@ if (str_starts_with($path, '/admin')) {
                 json_response(['ok' => true]);
             }
             if ($method === 'DELETE') {
+                if ($name === 'products') {
+                    $exists = db()->prepare('SELECT id, name FROM menu_items WHERE id=? LIMIT 1');
+                    $exists->execute([(int)$m[1]]);
+                    $product = $exists->fetch();
+                    if (!$product) json_response(['error' => 'Product not found'], 404);
+                    db()->prepare('UPDATE menu_items SET is_active=0 WHERE id=?')->execute([(int)$m[1]]);
+                    json_response(['ok' => true, 'soft_deleted' => true, 'product' => ['id' => (int)$product['id'], 'name' => $product['name'], 'is_active' => 0]]);
+                }
                 $previousImage = null;
                 if (in_array($name, ['products', 'categories', 'promotional-banners', 'promotional-popups'], true)) {
                     $previousStmt = db()->prepare('SELECT image_url FROM ' . $meta['table'] . ' WHERE id=? LIMIT 1');
@@ -3766,7 +4017,18 @@ if (str_starts_with($path, '/admin')) {
     }
     if ($path === '/admin/settings') {
         if ($method === 'GET') json_response(['settings' => sanitized_settings(settings())]);
-        if ($method === 'PUT') json_response(['settings' => sanitized_settings(upsert_setting_table('settings', $data))]);
+        if ($method === 'PUT') {
+            $previousSettings = settings();
+            $updatedSettings = upsert_setting_table('settings', $data);
+            if (array_key_exists('admin_new_order_custom_sound_url', $data)) {
+                $previousSound = (string)($previousSettings['admin_new_order_custom_sound_url'] ?? '');
+                $nextSound = (string)($updatedSettings['admin_new_order_custom_sound_url'] ?? '');
+                if ($previousSound !== '' && $previousSound !== $nextSound) {
+                    delete_local_upload($previousSound);
+                }
+            }
+            json_response(['settings' => sanitized_settings($updatedSettings)]);
+        }
     }
     if ($path === '/admin/settings/order-availability' && $method === 'GET') {
         json_response(['availability' => order_availability(), 'schedule' => order_schedule_from_settings(settings())]);

@@ -184,7 +184,7 @@ export default function StaffPage() {
   const [loading, setLoading] = useState(false);
 
   const loadStaffDashboard = useCallback(async () => {
-    if (!token()) return;
+    if (!token('staff')) return;
     try {
       const data = await api('/staff/dashboard');
       setStaffDashboard({ today: data.today || { orders: 0 }, current_orders: data.current_orders || [] });
@@ -195,7 +195,7 @@ export default function StaffPage() {
   }, []);
 
   useEffect(() => {
-    if (token()) api('/auth/me').then(data => {
+    if (token('staff')) api('/auth/me', { authScope: 'staff' }).then(data => {
       if (data.user?.role === 'staff') {
         setStaff(data.user);
         setPermissions({ ...defaultStaffPermissions, ...(data.user.permissions || {}) });
@@ -203,14 +203,25 @@ export default function StaffPage() {
         api('/staff/offers').then(offerData => setOffers(offerData.offers || [])).catch(() => {});
       }
     }).catch(() => {});
-    Promise.all([api('/menu'), api('/settings'), api('/offers/active-bogo')]).then(([menu, settingsResponse, bogo]) => {
+    api('/menu').then(menu => {
+      const menuItems = menu.items || menu.products || [];
       setCategories(menu.categories || []);
-      setItems(menu.items || []);
+      setItems(menuItems);
       setOptionGroups(menu.option_groups || []);
+      if (!menuItems.length) {
+        setMessage('Menu API returned no active products for Staff POS.');
+      }
+    }).catch(err => setMessage(`Unable to load Staff POS menu: ${err.message}`));
+    api('/settings').then(settingsResponse => {
       setPosEnabled((settingsResponse.settings?.staff_pos_enabled || '1') === '1');
+    }).catch(err => setMessage(current => current || `Unable to load Staff POS settings: ${err.message}`));
+    api('/offers/active-bogo').then(bogo => {
       setActiveBogoOffers(bogo.offers || []);
       setActiveBogoWeekday(bogo.weekday || '');
-    }).catch(err => setMessage(err.message));
+    }).catch(() => {
+      setActiveBogoOffers([]);
+      setActiveBogoWeekday('');
+    });
   }, [loadStaffDashboard]);
 
   useEffect(() => {
@@ -293,19 +304,19 @@ export default function StaffPage() {
     : discountType === 'bogo' ? bogoPreview.amount : 0;
   const totalDiscount = manualDiscount + explicitBogoDiscount;
   const finalTotal = Math.max(subtotal - totalDiscount, 0);
-  const cashAmount = ['cash', 'split'].includes(paymentMethod) ? Number(cashReceived || 0) : 0;
-  const onlineAmount = ['online', 'split'].includes(paymentMethod) ? Number(onlineReceived || 0) : 0;
+  const cashAmount = paymentMethod === 'cash' ? finalTotal : paymentMethod === 'split' ? Number(cashReceived || 0) : 0;
+  const onlineAmount = paymentMethod === 'online' ? finalTotal : paymentMethod === 'split' ? Number(onlineReceived || 0) : 0;
   const totalReceived = cashAmount + onlineAmount;
-  const change = Math.max(cashAmount - Math.max(finalTotal - onlineAmount, 0), 0);
-  const paidNow = Math.min(Math.max(totalReceived - change, 0), finalTotal);
-  const remaining = Math.max(finalTotal - paidNow, 0);
+  const change = Math.max(totalReceived - finalTotal, 0);
+  const paidNow = Math.min(totalReceived, finalTotal);
+  const remaining = Math.max(finalTotal - totalReceived, 0);
 
   async function staffLogin(event) {
     event.preventDefault();
     setMessage('');
     try {
       const data = await api('/auth/staff-login', { method: 'POST', body: JSON.stringify(login) });
-      setToken(data.token);
+      setToken(data.token, 'staff');
       setStaff(data.user);
       setPermissions({ ...defaultStaffPermissions, ...(data.user.permissions || {}) });
       loadStaffDashboard();
@@ -389,7 +400,7 @@ export default function StaffPage() {
       setCart((data.items || []).map(cartLineFromOrderItem));
       setCustomer({ name: data.order.customer_name || '', phone: data.order.customer_phone || '', email: data.order.customer_email || '' });
       setOrderType(data.order.order_type === 'takeaway' ? 'takeaway' : 'dine_in');
-      setPaymentMethod(data.order.payment_method || 'cash');
+      setPaymentMethod(['cash', 'online', 'split'].includes(data.order.payment_method) ? data.order.payment_method : 'cash');
       setCashReceived(data.order.cash_received || '');
       setOnlineReceived(data.order.online_received || '');
       setTableNumber(data.order.table_number || '');
@@ -408,6 +419,9 @@ export default function StaffPage() {
     setLoading(true);
     try {
       const payload = {
+        payment_method: paymentMethod,
+        cash_received: paymentMethod === 'split' ? cashReceived : undefined,
+        online_received: paymentMethod === 'split' ? onlineReceived : undefined,
         items: cart.map(line => ({
           id: line.id,
           variant_id: line.variant_id || null,
@@ -451,9 +465,6 @@ export default function StaffPage() {
     if (!permissions.create_orders) return setMessage('You do not have permission to create orders.');
     if (!cart.length) return setMessage('Cart is empty.');
     if (cashAmount < 0 || onlineAmount < 0 || Number.isNaN(cashAmount) || Number.isNaN(onlineAmount)) return setMessage('Enter valid payment amounts.');
-    if (paymentMethod === 'cash' && cashAmount <= 0) return setMessage('Enter cash received.');
-    if (paymentMethod === 'online' && onlineAmount <= 0) return setMessage('Enter online received amount.');
-    if (paymentMethod === 'split' && (cashAmount <= 0 || onlineAmount <= 0)) return setMessage('Split payment needs both cash and online amounts.');
     if (discountType === 'fixed' && Number(fixedDiscount || 0) > subtotal) return setMessage('Discount cannot exceed subtotal.');
     if (discountType === 'bogo' && (!selectedOfferId || bogoPreview.freeQty <= 0)) return setMessage('Select a valid BOGO offer for this cart.');
     setLoading(true);
@@ -464,8 +475,8 @@ export default function StaffPage() {
         order_type: orderType,
         payment_method: paymentMethod,
         items: cart.map(line => ({ id: line.id, variant_id: line.variant_id, option_ids: line.option_ids || [], quantity: line.quantity, client_key: line.key || '', is_bogo_free: Boolean(line.is_bogo_free), bogo_parent_key: line.bogo_parent_key || '' })),
-        cash_received: ['cash', 'split'].includes(paymentMethod) ? cashReceived : undefined,
-        online_received: ['online', 'split'].includes(paymentMethod) ? onlineReceived : undefined,
+        cash_received: paymentMethod === 'split' ? cashReceived : undefined,
+        online_received: paymentMethod === 'split' ? onlineReceived : undefined,
         table_number: orderType === 'dine_in' ? tableNumber : undefined,
         customer_name: customer.name,
         customer_phone: customer.phone,
@@ -589,8 +600,27 @@ export default function StaffPage() {
           <label className={paymentMethod === 'online' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'online'} onChange={() => setPaymentMethod('online')} />Online</label>
           <label className={paymentMethod === 'split' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'split'} onChange={() => setPaymentMethod('split')} />Split</label>
         </div>
-        {['cash', 'split'].includes(paymentMethod) ? <input className="staff-input" type="number" min="0" step="0.01" placeholder="Cash received" value={cashReceived} onChange={e => setCashReceived(e.target.value)} /> : null}
-        {['online', 'split'].includes(paymentMethod) ? <><input className="staff-input" type="number" min="0" step="0.01" placeholder="Online received manually" value={onlineReceived} onChange={e => setOnlineReceived(e.target.value)} /><p className="small-note">Counter online payment only. Collect via UPI/card/bank app and enter the received amount here.</p></> : null}
+        {paymentMethod === 'cash' ? (
+          <div className="staff-auto-payment-card">
+            <span>Cash</span>
+            <strong>{inr(finalTotal)}</strong>
+            <small>Paid · {inr(0)} Remaining</small>
+          </div>
+        ) : null}
+        {paymentMethod === 'online' ? (
+          <div className="staff-auto-payment-card">
+            <span>Online</span>
+            <strong>{inr(finalTotal)}</strong>
+            <small>Counter digital payment · {inr(0)} Remaining</small>
+          </div>
+        ) : null}
+        {paymentMethod === 'split' ? (
+          <>
+            <input className="staff-input" type="number" min="0" step="0.01" placeholder="Cash received" value={cashReceived} onChange={e => setCashReceived(e.target.value)} />
+            <input className="staff-input" type="number" min="0" step="0.01" placeholder="Online received" value={onlineReceived} onChange={e => setOnlineReceived(e.target.value)} />
+            <p className="small-note">Only split payment uses manual amounts. Counter online means UPI/card/bank app collected at the counter.</p>
+          </>
+        ) : null}
       </div>
 
       <div className="payment-breakdown staff-payment-breakdown">
@@ -641,7 +671,7 @@ export default function StaffPage() {
         <div className="staff-header-status">
           <span className="badge success">{staff.name}</span>
           <span className="badge warning">{orderType === 'dine_in' ? 'DINE-IN' : 'TAKEAWAY'}</span>
-          <button className="ghost" onClick={() => { clearToken(); setStaff(null); }}><LogOut size={16} /> Logout</button>
+          <button className="ghost" onClick={() => { clearToken('staff'); setStaff(null); }}><LogOut size={16} /> Logout</button>
         </div>
       </header>
       {message ? <p className="notice error">{message}</p> : null}
