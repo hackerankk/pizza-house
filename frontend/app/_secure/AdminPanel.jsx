@@ -30,6 +30,7 @@ const tabs = [
   ['promotional-popups', 'Offer Popup', Gift],
   ['delivery-slabs', 'Delivery Slabs', Truck],
   ['delivery-boys', 'Delivery Boys', Truck],
+  ['customers', 'Customers', UserRound],
   ['staff', 'Staff', UserRound],
   ['staff-performance', 'Staff Performance', CreditCard],
   ['reports-sales', 'Sales Report', CreditCard],
@@ -46,7 +47,7 @@ const navSections = [
   { label: 'Main', items: ['dashboard', 'orders', 'payments'] },
   { label: 'Catalog', items: ['products', 'categories', 'coupons', 'offers'] },
   { label: 'Promotional', items: ['promotional-banners', 'promotional-marquee', 'promotional-popups'] },
-  { label: 'People', items: ['staff', 'staff-performance', 'delivery-boys'] },
+  { label: 'People', items: ['customers', 'staff', 'staff-performance', 'delivery-boys'] },
   { label: 'Reports', items: ['reports-sales'] },
   { label: 'Delivery', items: ['delivery-slabs'] },
   { label: 'Settings', items: ['order-availability', 'integrations', 'appearance', 'feature-controls'] },
@@ -89,10 +90,14 @@ const staffPermissionLabels = {
   mark_order_ready_complete: ['Can Mark Ready/Complete', 'Allow staff to mark orders ready and completed.'],
   edit_orders: ['Can Edit Orders', 'Allow staff to edit their own active POS orders.'],
   view_today_orders: ["Can View Today's Orders", 'Allow staff to see current-day order count.'],
-  view_reports: ['Can View Reports', 'Allow staff report access if staff reports are exposed.']
+  view_reports: ['Can View Reports', 'Allow staff report access if staff reports are exposed.'],
+  apply_manual_discount: ['Can Apply Discounts', 'Allow staff to apply fixed, percentage, or BOGO discounts in POS.'],
+  view_customer_history: ['Can View Customer History', 'Allow staff to look up repeat customers by mobile number.'],
+  cancel_orders: ['Can Cancel Orders', 'Allow staff to cancel active POS orders.'],
+  delete_orders: ['Can Delete Orders', 'Allow staff to request safe deletion where supported.']
 };
 
-const defaultStaffPermissions = Object.fromEntries(Object.keys(staffPermissionLabels).map(key => [key, !['edit_orders', 'view_reports'].includes(key)]));
+const defaultStaffPermissions = Object.fromEntries(Object.keys(staffPermissionLabels).map(key => [key, !['edit_orders', 'view_reports', 'apply_manual_discount', 'view_customer_history', 'cancel_orders', 'delete_orders'].includes(key)]));
 
 const featureControlLabels = {
   customer_theme_enabled: ['Customer Theme', 'Show customer-facing theme controls in the website header/menu.'],
@@ -171,8 +176,15 @@ function adminLabel(field) {
 
 function productStartingPrice(item) {
   const variants = Array.isArray(item?.variants) ? item.variants.filter(v => Number(v.is_active) !== 0) : [];
-  if (variants.length) return Math.min(...variants.map(v => Number(v.price || item.price || 0)));
+  if (variants.length) return Math.min(...variants.map(v => effectiveVariantPrice(item, v)));
   return Number(item?.price || 0);
+}
+
+function effectiveVariantPrice(item, variant = null) {
+  const productPrice = Number(item?.price || 0);
+  if (!variant) return productPrice;
+  const variantPrice = Number(variant?.price || 0);
+  return variantPrice > 0 ? variantPrice : productPrice;
 }
 
 function readableStatus(value) {
@@ -531,7 +543,7 @@ function OrderEditModal({ data, menu, saving, onClose, onSave }) {
     if (!product) return 0;
     const variant = product.variants?.find(v => String(v.id) === String(line.variant_id)) || product.variants?.[0] || null;
     const options = optionRowsForLine(line).filter(option => (line.option_ids || []).includes(Number(option.id)));
-    return Number(variant?.price ?? product.price) + options.reduce((sum, option) => sum + editOptionPrice(option, variant?.name || line.variant_name), 0);
+    return effectiveVariantPrice(product, variant) + options.reduce((sum, option) => sum + editOptionPrice(option, variant?.name || line.variant_name), 0);
   }
 
   const localSubtotal = lines.reduce((sum, line) => sum + localUnit(line) * Number(line.quantity || 1), 0);
@@ -563,7 +575,7 @@ function OrderEditModal({ data, menu, saving, onClose, onSave }) {
                     <strong>{line.name || product?.name || 'Menu item'} {line.is_bogo_free ? <span className="bogo-free-badge">FREE</span> : null}</strong>
                     <small>{editVariantLabel(variant?.name || line.variant_name)} · {inr(localUnit(line))} each</small>
                   </div>
-                  {variants.length ? <select value={line.variant_id || ''} onChange={event => changeLine(line.rowKey, { variant_id: event.target.value, variant_name: variants.find(v => String(v.id) === event.target.value)?.name || '', option_ids: [] })}>{variants.map(variantRow => <option key={variantRow.id} value={variantRow.id}>{editVariantLabel(variantRow.name)} · {inr(variantRow.price)}</option>)}</select> : null}
+                  {variants.length ? <select value={line.variant_id || ''} onChange={event => changeLine(line.rowKey, { variant_id: event.target.value, variant_name: variants.find(v => String(v.id) === event.target.value)?.name || '', option_ids: [] })}>{variants.map(variantRow => <option key={variantRow.id} value={variantRow.id}>{editVariantLabel(variantRow.name)} · {inr(effectiveVariantPrice(product, variantRow))}</option>)}</select> : null}
                   {optionRows.length ? <div className="order-edit-options">{optionRows.map(option => <label key={option.id}><input type="checkbox" checked={(line.option_ids || []).includes(Number(option.id))} onChange={event => toggleLineOption(line, option.id, event.target.checked)} /> {option.group_name}: {option.name} <span>+{inr(editOptionPrice(option, variant?.name || line.variant_name))}</span></label>)}</div> : null}
                   <div className="order-edit-line-actions">
                     <div className="quantity-control small"><button onClick={() => changeLine(line.rowKey, { quantity: Math.max(1, Number(line.quantity) - 1) })}><Minus size={14} /></button><strong>{line.quantity}</strong><button onClick={() => changeLine(line.rowKey, { quantity: Number(line.quantity) + 1 })}><Plus size={14} /></button></div>
@@ -584,7 +596,7 @@ function OrderEditModal({ data, menu, saving, onClose, onSave }) {
               const variant = product?.variants?.find(v => Number(v.is_default) === 1) || product?.variants?.[0] || null;
               setAddDraft({ ...addDraft, item_id: event.target.value, variant_id: variant?.id || '', option_ids: [] });
             }}><option value="">Select product</option>{filteredProducts.map(product => <option key={product.id} value={product.id}>{product.name}</option>)}</select></label>
-            {selectedProduct?.variants?.length ? <label>Size / Variant<select value={addDraft.variant_id || selectedVariant?.id || ''} onChange={event => setAddDraft({ ...addDraft, variant_id: event.target.value, option_ids: [] })}>{selectedProduct.variants.map(variant => <option key={variant.id} value={variant.id}>{editVariantLabel(variant.name)} · {inr(variant.price)}</option>)}</select></label> : null}
+            {selectedProduct?.variants?.length ? <label>Size / Variant<select value={addDraft.variant_id || selectedVariant?.id || ''} onChange={event => setAddDraft({ ...addDraft, variant_id: event.target.value, option_ids: [] })}>{selectedProduct.variants.map(variant => <option key={variant.id} value={variant.id}>{editVariantLabel(variant.name)} · {inr(effectiveVariantPrice(selectedProduct, variant))}</option>)}</select></label> : null}
             {addOptionRows.length ? <div className="order-edit-options">{addOptionRows.map(option => <label key={option.id}><input type="checkbox" checked={(addDraft.option_ids || []).includes(Number(option.id))} onChange={event => toggleAddOption(option.id, event.target.checked)} /> {option.group_name}: {option.name} <span>+{inr(editOptionPrice(option, selectedVariant?.name))}</span></label>)}</div> : null}
             <div className="quantity-control"><button onClick={() => setAddDraft({ ...addDraft, quantity: Math.max(1, Number(addDraft.quantity) - 1) })}><Minus size={14} /></button><strong>{addDraft.quantity}</strong><button onClick={() => setAddDraft({ ...addDraft, quantity: Number(addDraft.quantity) + 1 })}><Plus size={14} /></button></div>
             <button onClick={addLine} disabled={!selectedProduct}><Plus size={16} /> Add Item</button>
@@ -688,6 +700,8 @@ export default function AdminPage() {
   const [deliveryBoys, setDeliveryBoys] = useState([]);
   const [deliveryBoyForm, setDeliveryBoyForm] = useState({ name: '', phone: '', email: '', password: '', is_active: '1' });
   const [editingDeliveryBoy, setEditingDeliveryBoy] = useState(null);
+  const [customers, setCustomers] = useState([]);
+  const [customerFilters, setCustomerFilters] = useState({ q: '' });
   const [staff, setStaff] = useState([]);
   const [staffForm, setStaffForm] = useState({ name: '', phone: '', email: '', password: '', is_active: '1', permissions: defaultStaffPermissions });
   const [editingStaff, setEditingStaff] = useState(null);
@@ -871,6 +885,10 @@ export default function AdminPage() {
         setDeliveryBoys(boysData.delivery_boys || []);
       }
       else if (active === 'delivery-boys') setDeliveryBoys((await adminRequest('/admin/delivery-boys')).delivery_boys || []);
+      else if (active === 'customers') {
+        const params = new URLSearchParams(Object.fromEntries(Object.entries(customerFilters).filter(([, value]) => value)));
+        setCustomers((await adminRequest(`/admin/customers${params.toString() ? `?${params}` : ''}`)).customers || []);
+      }
       else if (active === 'staff') setStaff((await adminRequest('/admin/staff')).staff || []);
       else if (active === 'staff-performance') setStaffPerformance((await adminRequest('/admin/staff-performance')).staff_performance || []);
       else if (active === 'reports-sales') {
@@ -1221,8 +1239,8 @@ export default function AdminPage() {
   async function confirmProductDelete() {
     if (!productDeleteCandidate) return;
     try {
-      await adminRequest(`/admin/products/${productDeleteCandidate.id}`, { method: 'DELETE' });
-      setMessage(`${productDeleteCandidate.name} removed from customer and staff menus.`);
+      const response = await adminRequest(`/admin/products/${productDeleteCandidate.id}`, { method: 'DELETE' });
+      setMessage(response.archived_due_to_history ? `${productDeleteCandidate.name} has order history, so it was archived instead of permanently deleted.` : `${productDeleteCandidate.name} permanently deleted.`);
       setProductDeleteCandidate(null);
       setEditing(null);
       setForm({});
@@ -1265,6 +1283,31 @@ export default function AdminPage() {
     try {
       await adminRequest(`/admin/orders/${order.id}`, { method: 'PUT', body: JSON.stringify(patch) });
       setMessage('Order updated.');
+      if (patch.status === 'cancelled') {
+        setOrderAlertQueue(current => current.filter(alertOrder => Number(alertOrder.id) !== Number(order.id)));
+        if (Number(newOrderAlert?.id) === Number(order.id)) {
+          setNewOrderAlert(null);
+          stopAlertEffects();
+        }
+      }
+      loadActive();
+    } catch (err) {
+      setMessage(err.message);
+    }
+  }
+
+  async function deleteAdminOrder(order) {
+    if (!window.confirm(`PERMANENTLY DELETE ORDER?\n\n${order.order_number}\n\nThis action cannot be undone.`)) return;
+    try {
+      await adminRequest(`/admin/orders/${order.id}`, { method: 'DELETE' });
+      setMessage(`${order.order_number} permanently deleted.`);
+      setOrders(current => current.filter(row => Number(row.id) !== Number(order.id)));
+      setTodayOrders(current => current.filter(row => Number(row.id) !== Number(order.id)));
+      setOrderAlertQueue(current => current.filter(alertOrder => Number(alertOrder.id) !== Number(order.id)));
+      if (Number(newOrderAlert?.id) === Number(order.id)) {
+        setNewOrderAlert(null);
+        stopAlertEffects();
+      }
       loadActive();
     } catch (err) {
       setMessage(err.message);
@@ -1940,6 +1983,7 @@ export default function AdminPage() {
                     {order.status === 'delivered' && order.source === 'staff_offline' ? <span className="badge success">Completed</span> : null}
                     {order.status === 'received' && isAlertableOrder(order) && order.source !== 'staff_offline' ? <button className="ghost" onClick={() => openAcceptOrder(order)}><Clock size={16} /> Accept</button> : null}
                     {(order.source === 'staff_offline' ? next : next.filter(status => status !== 'accepted')).map(status => <button key={status} className={status === 'cancelled' ? 'ghost danger' : 'ghost'} onClick={() => updateOrder(order, { status })}>{adminOrderActionLabel(order, status)}</button>)}
+                    <button className="ghost danger" onClick={() => deleteAdminOrder(order)}><Trash2 size={16} /> Permanently Delete</button>
                   </div>
                 </td>
               </tr>
@@ -2002,7 +2046,7 @@ export default function AdminPage() {
             <div>
               <span className="eyebrow">Delete Product?</span>
               <h2>{productDeleteCandidate.name}</h2>
-              <p>This product will no longer be available for customers or new staff orders. Historical orders will keep their saved item snapshots.</p>
+              <p>Products with no order history will be permanently deleted. Products already used in orders will be archived to preserve invoices, reports, and order history.</p>
             </div>
             <div className="action-row">
               <button className="ghost" onClick={() => setProductDeleteCandidate(null)}>Cancel</button>
@@ -2347,12 +2391,55 @@ export default function AdminPage() {
                           {order.status === 'delivered' && order.source === 'staff_offline' ? <span className="badge success">Completed</span> : null}
                           {order.status === 'received' && isAlertableOrder(order) && order.source !== 'staff_offline' ? <button className="ghost" onClick={() => openAcceptOrder(order)}><Clock size={16} /> Accept</button> : null}
                           {(order.source === 'staff_offline' ? next : next.filter(status => status !== 'accepted')).map(status => <button key={status} className={status === 'cancelled' ? 'ghost danger' : 'ghost'} onClick={() => updateOrder(order, { status })}>{adminOrderActionLabel(order, status)}</button>)}
+                          <button className="ghost danger" onClick={() => deleteAdminOrder(order)}><Trash2 size={16} /> Permanently Delete</button>
                         </div>
                       </td>
                     </tr>
                   );
                 })}</tbody>
               </table>
+            </div>
+          </section>
+        )}
+
+        {active === 'customers' && (
+          <section className="panel table-panel">
+            <div className="panel-heading orders-history-heading">
+              <div>
+                <h2>Customer History</h2>
+                <p>Search repeat customers by name, phone, email, or order number.</p>
+              </div>
+              <div className="order-filter-bar">
+                <input placeholder="Search customer, phone, email, order" value={customerFilters.q} onChange={e => setCustomerFilters({ ...customerFilters, q: e.target.value })} onKeyDown={e => { if (e.key === 'Enter') loadActive(); }} />
+                <button className="ghost" onClick={loadActive}><Search size={16} /> Search</button>
+              </div>
+            </div>
+            <div className="admin-offer-card-grid">
+              {customers.map(customer => (
+                <article className="admin-offer-card" key={customer.normalized_phone || customer.user_id || customer.phone}>
+                  <div>
+                    <span className="eyebrow">Customer</span>
+                    <h3>{customer.name || 'Customer'}</h3>
+                    <p>{customer.phone || 'No phone'}{customer.email ? ` · ${customer.email}` : ''}</p>
+                  </div>
+                  <StatusBadge tone="success">{customer.total_orders} order{customer.total_orders === 1 ? '' : 's'}</StatusBadge>
+                  <span className="badge">Spent {inr(customer.total_spent || 0)}</span>
+                  <span className="small-note">Last order {customer.last_order_at || '-'}</span>
+                  <div className="staff-current-order-list">
+                    {(customer.orders || []).map(order => (
+                      <div className="staff-current-order-card" key={order.id}>
+                        <div><strong>{order.order_number}</strong><span>{order.created_at}</span></div>
+                        <div><span>{order.source === 'staff_offline' ? 'Staff / Offline' : 'Online'} · {order.order_type}</span><strong>{inr(order.total_amount)}</strong></div>
+                        <div><span>{order.payment_status}</span><small>{statusLabel(order.status)}</small></div>
+                        <div className="action-row">
+                          <button className="ghost" onClick={() => openOrderDetails(order)}><Eye size={15} /> View Order</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ))}
+              {!customers.length ? <div className="empty-state">No matching customers yet. Try a phone number, name, email, or order number.</div> : null}
             </div>
           </section>
         )}
@@ -2386,7 +2473,7 @@ export default function AdminPage() {
         )}
 
         {active === 'staff' && (
-          <div className="admin-content-grid">
+          <div className="admin-content-grid staff-management-grid">
             <section className="panel">
               <div className="panel-heading"><h2>{editingStaff ? 'Edit' : 'Add'} Staff</h2><p>Create restricted POS staff accounts. Staff cannot access admin settings.</p></div>
               <div className="form-grid">

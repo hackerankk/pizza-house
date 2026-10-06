@@ -137,12 +137,12 @@ function ensure_order_management_schema(): void {
         INDEX idx_staff_permissions_key (permission_key),
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-    $defaultStaffPermissions = ['create_orders','view_current_orders','confirm_orders','mark_order_ready_complete','edit_orders','view_today_orders','view_reports'];
+    $defaultStaffPermissions = ['create_orders','view_current_orders','confirm_orders','mark_order_ready_complete','edit_orders','view_today_orders','view_reports','apply_manual_discount','view_customer_history','cancel_orders','delete_orders'];
     $staffUsers = $pdo->query("SELECT id FROM users WHERE role='staff'")->fetchAll();
     $permissionSeed = $pdo->prepare('INSERT IGNORE INTO staff_permissions (user_id, permission_key, is_allowed) VALUES (?, ?, ?)');
     foreach ($staffUsers as $staffUser) {
         foreach ($defaultStaffPermissions as $permissionKey) {
-            $permissionSeed->execute([(int)$staffUser['id'], $permissionKey, in_array($permissionKey, ['edit_orders','view_reports'], true) ? 0 : 1]);
+            $permissionSeed->execute([(int)$staffUser['id'], $permissionKey, in_array($permissionKey, ['edit_orders','view_reports','apply_manual_discount','view_customer_history','cancel_orders','delete_orders'], true) ? 0 : 1]);
         }
     }
     $categoryColumns = $pdo->prepare('SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?');
@@ -519,7 +519,9 @@ function valid_next_statuses(string $current, string $orderType, string $source 
             return [];
         }
         $index = array_search($current, $flow, true);
-        return $index !== false && isset($flow[$index + 1]) ? [$flow[$index + 1]] : [];
+        $next = $index !== false && isset($flow[$index + 1]) ? [$flow[$index + 1]] : [];
+        $next[] = 'cancelled';
+        return array_values(array_unique($next));
     }
     $flow = in_array($orderType, ['takeaway', 'dine_in'], true)
         ? ['received', 'accepted', 'preparing', 'ready', 'picked_up']
@@ -548,7 +550,7 @@ function today_range(): array {
 }
 
 function staff_permission_keys(): array {
-    return ['create_orders','view_current_orders','confirm_orders','mark_order_ready_complete','edit_orders','view_today_orders','view_reports'];
+    return ['create_orders','view_current_orders','confirm_orders','mark_order_ready_complete','edit_orders','view_today_orders','view_reports','apply_manual_discount','view_customer_history','cancel_orders','delete_orders'];
 }
 
 function default_staff_permissions(): array {
@@ -560,6 +562,10 @@ function default_staff_permissions(): array {
         'edit_orders' => false,
         'view_today_orders' => true,
         'view_reports' => false,
+        'apply_manual_discount' => false,
+        'view_customer_history' => false,
+        'cancel_orders' => false,
+        'delete_orders' => false,
     ];
 }
 
@@ -601,6 +607,44 @@ function order_is_admin_alertable(array $order): bool {
 
 function valid_coordinates($lat, $lng): bool {
     return valid_decimal($lat) && valid_decimal($lng) && (float)$lat >= -90 && (float)$lat <= 90 && (float)$lng >= -180 && (float)$lng <= 180;
+}
+
+function normalize_phone_number(?string $phone): string {
+    $digits = preg_replace('/\D+/', '', (string)$phone);
+    if (strlen($digits) > 10) {
+        return substr($digits, -10);
+    }
+    return $digits;
+}
+
+function permanently_delete_order_if_safe(PDO $pdo, array $order): array {
+    $blockedTables = [
+        'payments' => 'payment records',
+        'order_email_logs' => 'invoice/email logs',
+        'notifications' => 'notification audit records',
+    ];
+    foreach ($blockedTables as $table => $label) {
+        $count = $pdo->prepare("SELECT COUNT(*) FROM $table WHERE order_id=?");
+        $count->execute([$order['id']]);
+        if ((int)$count->fetchColumn() > 0) {
+            throw new ApiException('This order has ' . $label . '. Cancel it instead of deleting so reports and audit history remain correct.', 409);
+        }
+    }
+    if (!in_array($order['status'], ['received', 'cancelled'], true)) {
+        throw new ApiException('Only newly created or cancelled orders without audit records can be deleted.', 409);
+    }
+    $items = $pdo->prepare('SELECT menu_item_id, quantity, free_quantity FROM order_items WHERE order_id=?');
+    $items->execute([$order['id']]);
+    foreach ($items->fetchAll() as $item) {
+        if (!empty($item['menu_item_id'])) {
+            $qty = (int)$item['quantity'] + (int)$item['free_quantity'];
+            if ($qty > 0) {
+                $pdo->prepare('UPDATE menu_items SET stock = stock + ? WHERE id=?')->execute([$qty, $item['menu_item_id']]);
+            }
+        }
+    }
+    $pdo->prepare('DELETE FROM orders WHERE id=?')->execute([$order['id']]);
+    return ['ok' => true, 'deleted' => true];
 }
 
 function order_tracking_payload(array $order): array {
@@ -1712,6 +1756,16 @@ function staff_discount_from_payload(array $data, array $calc): array {
         $reason = trim((string)($data['discount_reason'] ?? ''));
         return ['amount' => $amount, 'type' => 'fixed', 'description' => $reason !== '' ? $reason : 'Staff fixed discount'];
     }
+    if ($type === 'percent') {
+        $raw = $data['discount_amount'] ?? 0;
+        if (!valid_decimal($raw)) json_response(['error' => 'Discount percent must be a valid number'], 422);
+        $percent = (float)$raw;
+        if ($percent < 0 || $percent > 100) json_response(['error' => 'Discount percent must be between 0 and 100'], 422);
+        $amount = money($subtotal * $percent / 100);
+        $reason = trim((string)($data['discount_reason'] ?? ''));
+        $label = rtrim(rtrim(number_format($percent, 2, '.', ''), '0'), '.') . '%';
+        return ['amount' => $amount, 'type' => 'percent', 'description' => $reason !== '' ? $reason : 'Staff percentage discount (' . $label . ')'];
+    }
     if ($type === 'bogo') {
         $offerId = (int)($data['offer_id'] ?? 0);
         if ($offerId <= 0) json_response(['error' => 'Select a valid BOGO offer'], 422);
@@ -1754,6 +1808,17 @@ function option_price_for_variant(array $option, string $variantName): float {
     return (float)($option['fixed_price'] ?? $option['small_price'] ?? 0);
 }
 
+function effective_product_unit_price(array $product, ?array $variant = null): float {
+    $productPrice = (float)($product['price'] ?? 0);
+    if ($variant) {
+        $variantPrice = (float)($variant['price'] ?? 0);
+        if ($variantPrice > 0) {
+            return $variantPrice;
+        }
+    }
+    return $productPrice;
+}
+
 function calculate_cart(array $items, ?string $couponCode, ?int $userId, ?float $lat, ?float $lng, string $orderType = 'delivery', bool $applyAutomaticBogo = true): array {
     if (!in_array($orderType, ['delivery', 'takeaway', 'dine_in'], true)) {
         json_response(['error' => 'Invalid order type'], 422);
@@ -1789,7 +1854,7 @@ function calculate_cart(array $items, ?string $couponCode, ?int $userId, ?float 
                 $variant = null;
             }
         }
-        $unitPrice = $variant ? (float)$variant['price'] : (float)$product['price'];
+        $unitPrice = effective_product_unit_price($product, $variant);
         $selectedOptions = [];
         $optionTotal = 0.0;
         $optionIds = array_values(array_unique(array_map('intval', $cartItem['option_ids'] ?? [])));
@@ -3123,6 +3188,86 @@ if ($path === '/staff/offers' && $method === 'GET') {
     json_response(['offers' => active_staff_offers()]);
 }
 
+if ($path === '/staff/customers/search' && $method === 'GET') {
+    $staff = current_user(true, 'staff');
+    require_staff_permission($staff, 'view_customer_history');
+    $phone = normalize_phone_number($_GET['phone'] ?? '');
+    if (strlen($phone) < 6) {
+        json_response(['customers' => []]);
+    }
+    $phoneExpr = "RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(u.phone, o.guest_phone, ''), '+', ''), ' ', ''), '-', ''), '(', ''), ')', ''), 10)";
+    $stmt = db()->prepare("SELECT o.id, o.order_number, o.created_at, o.order_type, o.status, o.total_amount, o.payment_status,
+            COALESCE(u.name, o.guest_name) AS customer_name,
+            COALESCE(u.email, o.guest_email) AS customer_email,
+            COALESCE(u.phone, o.guest_phone) AS customer_phone,
+            u.id AS user_id,
+            $phoneExpr AS normalized_phone
+        FROM orders o
+        LEFT JOIN users u ON u.id=o.user_id
+        WHERE $phoneExpr LIKE ?
+        ORDER BY o.created_at DESC
+        LIMIT 25");
+    $stmt->execute(['%' . $phone . '%']);
+    $rows = $stmt->fetchAll();
+    if (!$rows) {
+        json_response(['customers' => []]);
+    }
+    $first = $rows[0];
+    $totalSpent = array_reduce($rows, fn($sum, $row) => $sum + (float)$row['total_amount'], 0.0);
+    json_response(['customers' => [[
+        'user_id' => $first['user_id'] ? (int)$first['user_id'] : null,
+        'name' => $first['customer_name'] ?: 'Walk-in customer',
+        'email' => $first['customer_email'] ?: '',
+        'phone' => $first['customer_phone'] ?: '',
+        'normalized_phone' => $first['normalized_phone'],
+        'total_orders' => count($rows),
+        'total_spent' => money($totalSpent),
+        'last_order' => [
+            'id' => (int)$first['id'],
+            'order_number' => $first['order_number'],
+            'created_at' => $first['created_at'],
+            'order_type' => $first['order_type'],
+            'status' => $first['status'],
+            'total_amount' => (float)$first['total_amount'],
+            'payment_status' => $first['payment_status'],
+        ],
+        'orders' => array_map(fn($row) => [
+            'id' => (int)$row['id'],
+            'order_number' => $row['order_number'],
+            'created_at' => $row['created_at'],
+            'order_type' => $row['order_type'],
+            'status' => $row['status'],
+            'total_amount' => (float)$row['total_amount'],
+            'payment_status' => $row['payment_status'],
+        ], array_slice($rows, 0, 10)),
+    ]]]);
+}
+
+if (preg_match('#^/staff/orders/(\d+)$#', $path, $m) && $method === 'DELETE') {
+    $staff = current_user(true, 'staff');
+    require_staff_permission($staff, 'delete_orders');
+    $pdo = db();
+    $pdo->beginTransaction();
+    try {
+        $stmt = $pdo->prepare("SELECT * FROM orders WHERE id=? AND staff_id=? AND source='staff_offline' LIMIT 1 FOR UPDATE");
+        $stmt->execute([(int)$m[1], $staff['id']]);
+        $order = $stmt->fetch();
+        if (!$order) {
+            $pdo->rollBack();
+            json_response(['error' => 'Order not found'], 404);
+        }
+        $result = permanently_delete_order_if_safe($pdo, $order);
+        $pdo->commit();
+        json_response($result);
+    } catch (ApiException $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        json_response(['error' => $e->getMessage()], $e->status);
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        throw $e;
+    }
+}
+
 if ($path === '/staff/orders' && $method === 'POST') {
     $staff = current_user(true, 'staff');
     require_staff_permission($staff, 'create_orders');
@@ -3139,6 +3284,10 @@ if ($path === '/staff/orders' && $method === 'POST') {
     $existing->execute([$idempotency]);
     if ($row = $existing->fetch()) {
         json_response(['order' => public_order($row), 'duplicate' => true]);
+    }
+    $discountType = (string)($data['discount_type'] ?? 'none');
+    if ($discountType !== '' && $discountType !== 'none') {
+        require_staff_permission($staff, 'apply_manual_discount');
     }
     $calc = calculate_cart($data['items'], $data['coupon_code'] ?? null, null, null, null, $orderType, true);
     $staffDiscount = staff_discount_from_payload($data, $calc);
@@ -3209,9 +3358,11 @@ if (preg_match('#^/staff/orders/(\d+)$#', $path, $m) && $method === 'PUT') {
     $order = $stmt->fetch();
     if (!$order) json_response(['error' => 'Order not found'], 404);
     $status = (string)($data['status'] ?? '');
-    if (!in_array($status, ['accepted','ready','delivered'], true)) json_response(['error' => 'Invalid staff order action'], 422);
+    if (!in_array($status, ['accepted','ready','delivered','cancelled'], true)) json_response(['error' => 'Invalid staff order action'], 422);
     if ($status === 'accepted') {
         require_staff_permission($staff, 'confirm_orders');
+    } elseif ($status === 'cancelled') {
+        require_staff_permission($staff, 'cancel_orders');
     } else {
         require_staff_permission($staff, 'mark_order_ready_complete');
     }
@@ -3395,6 +3546,78 @@ if (str_starts_with($path, '/delivery')) {
 
 if (str_starts_with($path, '/admin')) {
     $admin = current_user(true, 'admin');
+    if ($path === '/admin/customers' && $method === 'GET') {
+        $pagination = pagination_params(25, 100);
+        $q = trim((string)($_GET['q'] ?? ''));
+        $normalizedQuery = normalize_phone_number($q);
+        $phoneExpr = "RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(u.phone, o.guest_phone, ''), '+', ''), ' ', ''), '-', ''), '(', ''), ')', ''), 10)";
+        $where = '1=1';
+        $params = [];
+        if ($q !== '') {
+            $where .= " AND (COALESCE(u.name, o.guest_name, '') LIKE ? OR COALESCE(u.email, o.guest_email, '') LIKE ? OR COALESCE(u.phone, o.guest_phone, '') LIKE ? OR o.order_number LIKE ?";
+            $like = '%' . $q . '%';
+            array_push($params, $like, $like, $like, $like);
+            if ($normalizedQuery !== '') {
+                $where .= " OR $phoneExpr LIKE ?";
+                $params[] = '%' . $normalizedQuery . '%';
+            }
+            $where .= ')';
+        }
+        $sql = "SELECT grouped.*
+            FROM (
+                SELECT
+                    $phoneExpr AS normalized_phone,
+                    MAX(COALESCE(u.id, 0)) AS user_id,
+                    SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(u.name, ''), NULLIF(o.guest_name, ''), 'Customer') ORDER BY o.created_at DESC SEPARATOR '||'), '||', 1) AS name,
+                    SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(u.email, ''), NULLIF(o.guest_email, ''), '') ORDER BY o.created_at DESC SEPARATOR '||'), '||', 1) AS email,
+                    SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(u.phone, ''), NULLIF(o.guest_phone, ''), '') ORDER BY o.created_at DESC SEPARATOR '||'), '||', 1) AS phone,
+                    COUNT(*) AS total_orders,
+                    COALESCE(SUM(o.total_amount), 0) AS total_spent,
+                    MAX(o.created_at) AS last_order_at
+                FROM orders o
+                LEFT JOIN users u ON u.id=o.user_id
+                WHERE $where
+                GROUP BY normalized_phone
+            ) grouped
+            WHERE grouped.normalized_phone <> ''
+            ORDER BY grouped.last_order_at DESC
+            LIMIT ? OFFSET ?";
+        $stmt = paginated_query($sql, $params, $pagination);
+        $customers = [];
+        foreach ($stmt->fetchAll() as $customer) {
+            $ordersStmt = db()->prepare("SELECT id, order_number, created_at, order_type, source, status, total_amount, payment_status, paid_amount, remaining_amount
+                FROM orders
+                WHERE RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(guest_phone, ''), '+', ''), ' ', ''), '-', ''), '(', ''), ')', ''), 10)=?
+                   OR user_id=?
+                ORDER BY created_at DESC
+                LIMIT 10");
+            $ordersStmt->execute([$customer['normalized_phone'], (int)$customer['user_id'] ?: -1]);
+            $orders = $ordersStmt->fetchAll();
+            $customers[] = [
+                'user_id' => (int)$customer['user_id'] ?: null,
+                'name' => $customer['name'] ?: 'Customer',
+                'email' => $customer['email'] ?: '',
+                'phone' => $customer['phone'] ?: '',
+                'normalized_phone' => $customer['normalized_phone'],
+                'total_orders' => (int)$customer['total_orders'],
+                'total_spent' => money((float)$customer['total_spent']),
+                'last_order_at' => $customer['last_order_at'],
+                'orders' => array_map(fn($order) => [
+                    'id' => (int)$order['id'],
+                    'order_number' => $order['order_number'],
+                    'created_at' => $order['created_at'],
+                    'order_type' => $order['order_type'],
+                    'source' => $order['source'],
+                    'status' => $order['status'],
+                    'total_amount' => (float)$order['total_amount'],
+                    'payment_status' => $order['payment_status'],
+                    'paid_amount' => (float)$order['paid_amount'],
+                    'remaining_amount' => (float)$order['remaining_amount'],
+                ], $orders),
+            ];
+        }
+        json_response(['customers' => $customers, 'pagination' => $pagination]);
+    }
     if ($path === '/admin/reports/sales' && $method === 'GET') {
         $today = new DateTimeImmutable('today', restaurant_timezone());
         $preset = (string)($_GET['preset'] ?? 'today');
@@ -3840,12 +4063,37 @@ if (str_starts_with($path, '/admin')) {
             }
             if ($method === 'DELETE') {
                 if ($name === 'products') {
-                    $exists = db()->prepare('SELECT id, name FROM menu_items WHERE id=? LIMIT 1');
+                    $exists = db()->prepare('SELECT id, name, image_url FROM menu_items WHERE id=? LIMIT 1');
                     $exists->execute([(int)$m[1]]);
                     $product = $exists->fetch();
                     if (!$product) json_response(['error' => 'Product not found'], 404);
-                    db()->prepare('UPDATE menu_items SET is_active=0 WHERE id=?')->execute([(int)$m[1]]);
-                    json_response(['ok' => true, 'soft_deleted' => true, 'product' => ['id' => (int)$product['id'], 'name' => $product['name'], 'is_active' => 0]]);
+                    $refStmt = db()->prepare('SELECT COUNT(*) FROM order_items WHERE menu_item_id=?');
+                    $refStmt->execute([(int)$product['id']]);
+                    $historicalRefs = (int)$refStmt->fetchColumn();
+                    if ($historicalRefs > 0) {
+                        db()->prepare('UPDATE menu_items SET is_active=0 WHERE id=?')->execute([(int)$product['id']]);
+                        json_response([
+                            'ok' => true,
+                            'archived_due_to_history' => true,
+                            'message' => 'Product has historical order references, so it was archived instead of permanently deleted.',
+                            'product' => ['id' => (int)$product['id'], 'name' => $product['name'], 'is_active' => 0],
+                        ]);
+                    }
+                    $pdo = db();
+                    $pdo->beginTransaction();
+                    try {
+                        $pdo->prepare('UPDATE offers SET is_active=0 WHERE buy_product_id=? OR free_product_id=? OR (scope=? AND scope_id=?)')
+                            ->execute([(int)$product['id'], (int)$product['id'], 'item', (int)$product['id']]);
+                        $pdo->prepare("UPDATE promotional_banners SET is_active=0 WHERE destination_type='product' AND destination_value=?")->execute([(string)$product['id']]);
+                        $pdo->prepare("UPDATE promotional_popups SET is_active=0 WHERE destination_type='product' AND destination_value=?")->execute([(string)$product['id']]);
+                        $pdo->prepare('DELETE FROM menu_items WHERE id=?')->execute([(int)$product['id']]);
+                        $pdo->commit();
+                    } catch (Throwable $e) {
+                        if ($pdo->inTransaction()) $pdo->rollBack();
+                        throw $e;
+                    }
+                    delete_local_upload($product['image_url'] ?? '');
+                    json_response(['ok' => true, 'permanently_deleted' => true, 'product' => ['id' => (int)$product['id'], 'name' => $product['name']]]);
                 }
                 $previousImage = null;
                 if (in_array($name, ['products', 'categories', 'promotional-banners', 'promotional-popups'], true)) {
@@ -3959,6 +4207,28 @@ if (str_starts_with($path, '/admin')) {
             ORDER BY offline_sales DESC, u.name");
         $stmt->execute([$from, $to]);
         json_response(['staff_performance' => $stmt->fetchAll(), 'from' => $from, 'to' => $to]);
+    }
+    if (preg_match('#^/admin/orders/(\d+)$#', $path, $m) && $method === 'DELETE') {
+        $pdo = db();
+        $pdo->beginTransaction();
+        try {
+            $stmt = $pdo->prepare('SELECT * FROM orders WHERE id=? LIMIT 1 FOR UPDATE');
+            $stmt->execute([(int)$m[1]]);
+            $order = $stmt->fetch();
+            if (!$order) {
+                $pdo->rollBack();
+                json_response(['error' => 'Order not found'], 404);
+            }
+            $result = permanently_delete_order_if_safe($pdo, $order);
+            $pdo->commit();
+            json_response($result);
+        } catch (ApiException $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            json_response(['error' => $e->getMessage()], $e->status);
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            throw $e;
+        }
     }
     if (preg_match('#^/admin/orders/(\d+)$#', $path, $m) && $method === 'PUT') {
         $stmt = db()->prepare('SELECT * FROM orders WHERE id=?');

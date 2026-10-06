@@ -23,7 +23,7 @@ function StaffOptionModal({ item, optionGroups, onClose, onAdd }) {
   const allowedGroups = isPizza ? optionGroups : optionGroups.filter(group => !group.name?.toLowerCase().includes('crust') && !group.name?.toLowerCase().includes('topping'));
   const optionRows = allowedGroups.flatMap(group => (group.options || []).map(option => ({ ...option, group_name: group.name })));
   const chosen = optionRows.filter(option => selectedOptions.includes(Number(option.id)));
-  const unitPrice = Number(variant?.price ?? item.price) + chosen.reduce((sum, option) => sum + optionPrice(option, variant?.name), 0);
+  const unitPrice = effectiveVariantPrice(item, variant) + chosen.reduce((sum, option) => sum + optionPrice(option, variant?.name), 0);
   const optionIds = chosen.map(option => Number(option.id)).sort((a, b) => a - b);
 
   function toggleOption(id, checked) {
@@ -37,7 +37,7 @@ function StaffOptionModal({ item, optionGroups, onClose, onAdd }) {
           <div><h2>{item.name}</h2><p>{item.description}</p></div>
           <button className="icon-button" onClick={onClose}>×</button>
         </div>
-        {variants.length ? <section className="option-section"><h3>Variant / Size</h3><div className="choice-list">{variants.map(v => <label className="choice-row" key={v.id}><input type="radio" checked={Number(variant?.id) === Number(v.id)} onChange={() => { setVariantId(v.id); setSelectedOptions([]); }} /><span>{v.name === 'S' ? 'Small' : v.name === 'M' ? 'Medium' : v.name === 'L' ? 'Large' : v.name}</span><strong>{inr(v.price)}</strong></label>)}</div></section> : null}
+        {variants.length ? <section className="option-section"><h3>Variant / Size</h3><div className="choice-list">{variants.map(v => <label className="choice-row" key={v.id}><input type="radio" checked={Number(variant?.id) === Number(v.id)} onChange={() => { setVariantId(v.id); setSelectedOptions([]); }} /><span>{v.name === 'S' ? 'Small' : v.name === 'M' ? 'Medium' : v.name === 'L' ? 'Large' : v.name}</span><strong>{inr(effectiveVariantPrice(item, v))}</strong></label>)}</div></section> : null}
         {optionRows.length ? <section className="option-section"><h3>Options</h3><div className="choice-list">{optionRows.map(option => <label className="choice-row" key={option.id}><input type="checkbox" checked={selectedOptions.includes(Number(option.id))} onChange={e => toggleOption(option.id, e.target.checked)} /><span>{option.group_name}: {option.name}</span><strong>+{inr(optionPrice(option, variant?.name))}</strong></label>)}</div></section> : null}
         <div className="option-modal-footer">
           <div className="quantity-control"><button onClick={() => setQuantity(q => Math.max(1, q - 1))}><Minus size={14} /></button><strong>{quantity}</strong><button onClick={() => setQuantity(q => Math.min(Number(item.stock), q + 1))}><Plus size={14} /></button></div>
@@ -56,6 +56,19 @@ function staffSizeLabel(name) {
   return name || 'Regular';
 }
 
+function effectiveVariantPrice(item, variant = null) {
+  const productPrice = Number(item?.price || 0);
+  if (!variant) return productPrice;
+  const variantPrice = Number(variant?.price || 0);
+  return variantPrice > 0 ? variantPrice : productPrice;
+}
+
+function staffStartingPrice(item) {
+  const variants = Array.isArray(item?.variants) ? item.variants : [];
+  if (!variants.length) return Number(item?.price || 0);
+  return Math.min(...variants.map(variant => effectiveVariantPrice(item, variant)));
+}
+
 const defaultStaffPermissions = {
   create_orders: true,
   view_current_orders: true,
@@ -63,7 +76,11 @@ const defaultStaffPermissions = {
   mark_order_ready_complete: true,
   edit_orders: false,
   view_today_orders: true,
-  view_reports: false
+  view_reports: false,
+  apply_manual_discount: false,
+  view_customer_history: false,
+  cancel_orders: false,
+  delete_orders: false
 };
 
 function staffOrderActionLabel(status) {
@@ -78,6 +95,10 @@ function nextStaffStatuses(order) {
   if (order.status === 'accepted') return ['ready'];
   if (order.status === 'ready') return ['delivered'];
   return [];
+}
+
+function staffCancellable(order) {
+  return order && !['delivered', 'cancelled'].includes(order.status);
 }
 
 function StaffBogoModal({ unlock, items, categories, onClose, onAdd }) {
@@ -102,7 +123,8 @@ function StaffBogoModal({ unlock, items, categories, onClose, onAdd }) {
   const eligibleProductNames = eligibleItems.slice(0, 6).map(item => item.name).join(', ');
 
   function addFree(variant) {
-    if (!selectedItem || Number(variant.price) > Number(unlock.line.price)) return;
+    const variantPrice = effectiveVariantPrice(selectedItem, variant);
+    if (!selectedItem || variantPrice > Number(unlock.line.price)) return;
     onAdd({
       ...selectedItem,
       key: `bogo:${unlock.line.key}:${selectedItem.id}:${variant.id}`,
@@ -110,7 +132,7 @@ function StaffBogoModal({ unlock, items, categories, onClose, onAdd }) {
       variant_name: variant.name,
       option_ids: [],
       options: [],
-      price: Number(variant.price),
+      price: variantPrice,
       quantity: 1,
       is_bogo_free: true,
       bogo_parent_key: unlock.line.key
@@ -138,8 +160,9 @@ function StaffBogoModal({ unlock, items, categories, onClose, onAdd }) {
           {visibleItems.map(item => <button key={item.id} className={String(selectedItem?.id) === String(item.id) ? 'bogo-product-card active' : 'bogo-product-card'} onClick={() => setProductId(item.id)}><img src={productImage(item)} alt="" /><span>{item.name}</span></button>)}
         </div>
         {selectedItem ? <div className="bogo-size-grid">{(selectedItem.variants || []).filter(variant => ['S', 'M', 'L'].includes(variant.name)).map(variant => {
-          const disabled = Number(variant.price) > Number(unlock.line.price);
-          return <button key={variant.id} className={disabled ? 'bogo-size-option disabled' : 'bogo-size-option'} disabled={disabled} onClick={() => addFree(variant)}><strong>{staffSizeLabel(variant.name)}</strong><span>{inr(variant.price)} {disabled ? '' : 'FREE'}</span><small>{disabled ? 'Not eligible: higher than paid pizza' : 'Eligible free size'}</small></button>;
+          const variantPrice = effectiveVariantPrice(selectedItem, variant);
+          const disabled = variantPrice > Number(unlock.line.price);
+          return <button key={variant.id} className={disabled ? 'bogo-size-option disabled' : 'bogo-size-option'} disabled={disabled} onClick={() => addFree(variant)}><strong>{staffSizeLabel(variant.name)}</strong><span>{inr(variantPrice)} {disabled ? '' : 'FREE'}</span><small>{disabled ? 'Not eligible: higher than paid pizza' : 'Eligible free size'}</small></button>;
         })}</div> : <p className="notice warning">No eligible pizzas configured.</p>}
       </div>
     </div>
@@ -177,6 +200,9 @@ export default function StaffPage() {
   const [onlineReceived, setOnlineReceived] = useState('');
   const [tableNumber, setTableNumber] = useState('');
   const [customer, setCustomer] = useState({ name: '', phone: '', email: '' });
+  const [customerLookup, setCustomerLookup] = useState(null);
+  const [customerLookupLoading, setCustomerLookupLoading] = useState(false);
+  const [customerHistoryOpen, setCustomerHistoryOpen] = useState(false);
   const [message, setMessage] = useState('');
   const [createdOrder, setCreatedOrder] = useState(null);
   const [editingOrder, setEditingOrder] = useState(null);
@@ -235,6 +261,39 @@ export default function StaffPage() {
     const handle = setTimeout(() => setDebouncedSearch(search.trim()), 180);
     return () => clearTimeout(handle);
   }, [search]);
+
+  useEffect(() => {
+    if (!staff || !permissions.view_customer_history) {
+      setCustomerLookup(null);
+      return undefined;
+    }
+    const normalizedPhone = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+    if (normalizedPhone.length < 6) {
+      setCustomerLookup(null);
+      setCustomerHistoryOpen(false);
+      return undefined;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        setCustomerLookupLoading(true);
+        const data = await api(`/staff/customers/search?phone=${encodeURIComponent(normalizedPhone)}`, { authScope: 'staff' });
+        const match = (data.customers || [])[0] || null;
+        setCustomerLookup(match);
+        if (match) {
+          setCustomer(current => ({
+            ...current,
+            name: current.name || match.name || '',
+            email: current.email || match.email || ''
+          }));
+        }
+      } catch (err) {
+        setCustomerLookup(null);
+      } finally {
+        setCustomerLookupLoading(false);
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [customer.phone, permissions.view_customer_history, staff]);
 
   const visibleItems = useMemo(() => {
     const q = debouncedSearch.toLowerCase();
@@ -301,6 +360,8 @@ export default function StaffPage() {
   }, [cart, discountType, selectedOffer, subtotal]);
   const manualDiscount = discountType === 'fixed'
     ? Math.min(Math.max(Number(fixedDiscount || 0), 0), subtotal)
+    : discountType === 'percent'
+      ? Math.min(subtotal, subtotal * Math.min(Math.max(Number(fixedDiscount || 0), 0), 100) / 100)
     : discountType === 'bogo' ? bogoPreview.amount : 0;
   const totalDiscount = manualDiscount + explicitBogoDiscount;
   const finalTotal = Math.max(subtotal - totalDiscount, 0);
@@ -310,6 +371,14 @@ export default function StaffPage() {
   const change = Math.max(totalReceived - finalTotal, 0);
   const paidNow = Math.min(totalReceived, finalTotal);
   const remaining = Math.max(finalTotal - totalReceived, 0);
+
+  function choosePaymentMethod(method) {
+    setPaymentMethod(method);
+    if (method !== 'split') {
+      setCashReceived('');
+      setOnlineReceived('');
+    }
+  }
 
   async function staffLogin(event) {
     event.preventDefault();
@@ -347,7 +416,7 @@ export default function StaffPage() {
       return;
     }
     const variant = variants.find(v => Number(v.is_default) === 1) || variants[0] || null;
-    addLine({ ...item, key: `${item.id}:${variant?.id || ''}:`, variant_id: variant?.id || null, variant_name: variant?.name || null, option_ids: [], options: [], price: Number(variant?.price ?? item.price), quantity: 1 });
+    addLine({ ...item, key: `${item.id}:${variant?.id || ''}:`, variant_id: variant?.id || null, variant_name: variant?.name || null, option_ids: [], options: [], price: effectiveVariantPrice(item, variant), quantity: 1 });
   }
 
   function resetOrderForm() {
@@ -434,6 +503,10 @@ export default function StaffPage() {
       };
       const data = await api(`/staff/orders/${editingOrder.id}/edit`, { method: 'PUT', body: JSON.stringify(payload) });
       setCreatedOrder(data.order);
+      setStaffDashboard(current => ({
+        ...current,
+        current_orders: (current.current_orders || []).filter(row => Number(row.id) !== Number(editingOrder.id))
+      }));
       resetOrderForm();
       setMessage('Order updated and totals recalculated.');
       loadStaffDashboard();
@@ -466,6 +539,8 @@ export default function StaffPage() {
     if (!cart.length) return setMessage('Cart is empty.');
     if (cashAmount < 0 || onlineAmount < 0 || Number.isNaN(cashAmount) || Number.isNaN(onlineAmount)) return setMessage('Enter valid payment amounts.');
     if (discountType === 'fixed' && Number(fixedDiscount || 0) > subtotal) return setMessage('Discount cannot exceed subtotal.');
+    if (discountType === 'percent' && (Number(fixedDiscount || 0) < 0 || Number(fixedDiscount || 0) > 100)) return setMessage('Percentage discount must be between 0 and 100.');
+    if (['fixed', 'percent', 'bogo'].includes(discountType) && !permissions.apply_manual_discount) return setMessage('You do not have permission to apply discounts.');
     if (discountType === 'bogo' && (!selectedOfferId || bogoPreview.freeQty <= 0)) return setMessage('Select a valid BOGO offer for this cart.');
     setLoading(true);
     setMessage('');
@@ -482,8 +557,8 @@ export default function StaffPage() {
         customer_phone: customer.phone,
         customer_email: customer.email,
         discount_type: discountType,
-        discount_amount: discountType === 'fixed' ? fixedDiscount : undefined,
-        discount_reason: discountType === 'fixed' ? discountReason : undefined,
+        discount_amount: ['fixed', 'percent'].includes(discountType) ? fixedDiscount : undefined,
+        discount_reason: ['fixed', 'percent'].includes(discountType) ? discountReason : undefined,
         offer_id: discountType === 'bogo' ? selectedOfferId : undefined,
         idempotency_key: idempotency
       };
@@ -503,6 +578,29 @@ export default function StaffPage() {
       setMessage('');
       await api(`/staff/orders/${order.id}`, { method: 'PUT', body: JSON.stringify({ status }) });
       setMessage(`Order ${order.order_number} updated.`);
+      if (['cancelled', 'delivered'].includes(status)) {
+        setStaffDashboard(current => ({
+          ...current,
+          current_orders: (current.current_orders || []).filter(row => Number(row.id) !== Number(order.id))
+        }));
+      }
+      loadStaffDashboard();
+    } catch (err) {
+      setMessage(err.message);
+    }
+  }
+
+  async function deleteStaffOrder(order) {
+    if (!permissions.delete_orders) return setMessage('You do not have permission to delete orders.');
+    if (!window.confirm(`Delete ${order.order_number}? This only works for safe, non-audited POS orders.`)) return;
+    try {
+      setMessage('');
+      await api(`/staff/orders/${order.id}`, { method: 'DELETE' });
+      setMessage(`Order ${order.order_number} deleted.`);
+      setStaffDashboard(current => ({
+        ...current,
+        current_orders: (current.current_orders || []).filter(row => Number(row.id) !== Number(order.id))
+      }));
       loadStaffDashboard();
     } catch (err) {
       setMessage(err.message);
@@ -547,6 +645,21 @@ export default function StaffPage() {
         <input className="staff-input" placeholder="Phone optional" value={customer.phone} onChange={e => setCustomer({ ...customer, phone: e.target.value })} />
         <input className="staff-input" placeholder="Email optional" value={customer.email} onChange={e => setCustomer({ ...customer, email: e.target.value })} />
       </div>
+      {permissions.view_customer_history && (customerLookupLoading || customerLookup) ? (
+        <div className="staff-auto-payment-card">
+          {customerLookupLoading ? <span>Looking up customer history...</span> : (
+            <>
+              <span>Repeat Customer</span>
+              <strong>{customerLookup.name || customerLookup.phone}</strong>
+              <small>{customerLookup.total_orders} order{customerLookup.total_orders === 1 ? '' : 's'} · Spent {inr(customerLookup.total_spent || 0)} · Last {customerLookup.last_order?.order_number}</small>
+              <div className="action-row">
+                <button className="ghost" onClick={() => setCustomerHistoryOpen(open => !open)}>{customerHistoryOpen ? 'Hide History' : 'View History'}</button>
+              </div>
+              {customerHistoryOpen ? <div className="staff-current-order-list">{(customerLookup.orders || []).map(order => <div className="staff-current-order-card" key={order.id}><div><strong>{order.order_number}</strong><span>{order.created_at}</span></div><div><span>{order.order_type}</span><strong>{inr(order.total_amount)}</strong></div><div><span>{order.payment_status}</span><small>{order.status}</small></div></div>)}</div> : null}
+            </>
+          )}
+        </div>
+      ) : null}
 
       <div className="staff-cart-lines">
         {!cart.length ? <div className="empty-state compact"><strong>No items yet</strong><p>Add products from the menu to start a counter order.</p></div> : null}
@@ -569,18 +682,21 @@ export default function StaffPage() {
       <div className="staff-payment-section">
         <div className="staff-discount-head">
           <div><span className="eyebrow">Discount</span><strong>{manualDiscount > 0 ? `-${inr(manualDiscount)}` : 'No discount'}</strong></div>
-          <button className="ghost" onClick={() => setDiscountOpen(open => !open)}>{discountOpen ? 'Hide' : 'Add Discount'}</button>
+          {permissions.apply_manual_discount ? <button className="ghost" onClick={() => { setDiscountOpen(open => !open); if (discountType === 'none') setDiscountType('fixed'); }}>{discountOpen ? 'Hide' : 'Add Discount'}</button> : <span className="small-note">No discount permission</span>}
         </div>
-        {discountOpen ? (
+        {discountOpen && permissions.apply_manual_discount ? (
           <div className="staff-discount-panel">
             <select className="staff-input" value={discountType} onChange={e => setDiscountType(e.target.value)}>
               <option value="none">No discount</option>
               <option value="fixed">Fixed amount</option>
+              <option value="percent">Percentage</option>
+              <option value="bogo">BOGO offer</option>
             </select>
-            {discountType === 'fixed' ? (
+            {['fixed', 'percent'].includes(discountType) ? (
               <>
-                <input className="staff-input" type="number" min="0" max={subtotal} step="0.01" placeholder="Discount amount" value={fixedDiscount} onChange={e => setFixedDiscount(e.target.value)} />
+                <input className="staff-input" type="number" min="0" max={discountType === 'percent' ? 100 : subtotal} step="0.01" placeholder={discountType === 'percent' ? 'Discount percent' : 'Discount amount'} value={fixedDiscount} onChange={e => setFixedDiscount(e.target.value)} />
                 <input className="staff-input" placeholder="Reason / note optional" value={discountReason} onChange={e => setDiscountReason(e.target.value)} />
+                {discountType === 'percent' ? <p className="small-note">Calculated discount: {inr(manualDiscount)}</p> : null}
               </>
             ) : null}
             {discountType === 'bogo' ? (
@@ -596,9 +712,9 @@ export default function StaffPage() {
         ) : null}
         <span className="eyebrow">Payment</span>
         <div className="payment-options staff-payment-options">
-          <label className={paymentMethod === 'cash' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'cash'} onChange={() => setPaymentMethod('cash')} />Cash</label>
-          <label className={paymentMethod === 'online' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'online'} onChange={() => setPaymentMethod('online')} />Online</label>
-          <label className={paymentMethod === 'split' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'split'} onChange={() => setPaymentMethod('split')} />Split</label>
+          <label className={paymentMethod === 'cash' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'cash'} onChange={() => choosePaymentMethod('cash')} />Cash</label>
+          <label className={paymentMethod === 'online' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'online'} onChange={() => choosePaymentMethod('online')} />Online</label>
+          <label className={paymentMethod === 'split' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'split'} onChange={() => choosePaymentMethod('split')} />Split</label>
         </div>
         {paymentMethod === 'cash' ? (
           <div className="staff-auto-payment-card">
@@ -623,16 +739,18 @@ export default function StaffPage() {
         ) : null}
       </div>
 
-      <div className="payment-breakdown staff-payment-breakdown">
-        <div><span>Subtotal</span><strong>{inr(subtotal)}</strong></div>
+      {paymentMethod === 'split' ? (
+        <div className="payment-breakdown staff-payment-breakdown">
+          <div><span>Subtotal</span><strong>{inr(subtotal)}</strong></div>
           {explicitBogoDiscount > 0 ? <div><span>BOGO Discount</span><strong>-{inr(explicitBogoDiscount)}</strong></div> : null}
           <div><span>Discount</span><strong>{manualDiscount > 0 ? `-${inr(manualDiscount)}` : inr(0)}</strong></div>
-        <div className="grand"><span>Final Total</span><strong>{inr(finalTotal)}</strong></div>
-        <div><span>Total Received</span><strong>{inr(totalReceived)}</strong></div>
-        <div><span>Paid</span><strong>{inr(paidNow)}</strong></div>
-        <div><span>Remaining</span><strong>{inr(remaining)}</strong></div>
-        <div><span>Change</span><strong>{inr(change)}</strong></div>
-      </div>
+          <div className="grand"><span>Final Total</span><strong>{inr(finalTotal)}</strong></div>
+          <div><span>Total Received</span><strong>{inr(totalReceived)}</strong></div>
+          <div><span>Paid</span><strong>{inr(paidNow)}</strong></div>
+          <div><span>Remaining</span><strong>{inr(remaining)}</strong></div>
+          <div><span>Change</span><strong>{inr(change)}</strong></div>
+        </div>
+      ) : null}
       <button className="full-width staff-place-order" onClick={editingOrder ? saveEditedOrder : createOrder} disabled={loading || !cart.length || (!editingOrder && !permissions.create_orders) || (editingOrder && !permissions.edit_orders)}>{editingOrder ? <Save size={18} /> : <CreditCard size={18} />} {loading ? (editingOrder ? 'Saving...' : 'Creating...') : editingOrder ? (permissions.edit_orders ? 'Save Edited Order' : 'Edit Disabled') : permissions.create_orders ? 'Place Order' : 'Create Order Disabled'}</button>
     </aside>
   );
@@ -655,7 +773,7 @@ export default function StaffPage() {
         <form className="admin-login-card" onSubmit={staffLogin}>
           <span className="eyebrow">Staff POS</span>
           <h1>Staff login</h1>
-          {message ? <p className="notice error">{message}</p> : null}
+          {message ? <p className="notice error" role="alert" aria-live="polite">{message}</p> : null}
           <input type="email" placeholder="Email / username" value={login.email} onChange={e => setLogin({ ...login, email: e.target.value })} />
           <input type="password" placeholder="Password" value={login.password} onChange={e => setLogin({ ...login, password: e.target.value })} />
           <button>Login to POS</button>
@@ -674,7 +792,7 @@ export default function StaffPage() {
           <button className="ghost" onClick={() => { clearToken('staff'); setStaff(null); }}><LogOut size={16} /> Logout</button>
         </div>
       </header>
-      {message ? <p className="notice error">{message}</p> : null}
+      {message ? <p className="notice error" role="alert" aria-live="polite">{message}</p> : null}
       {createdOrder ? <section className="staff-success-card"><h2>Order Created Successfully</h2><p><strong>{createdOrder.order_number}</strong></p><p>Subtotal: {inr(createdOrder.subtotal)} · Discount: {inr(createdOrder.discount_amount || 0)} · Total: {inr(createdOrder.total_amount)}</p>{createdOrder.discount_description ? <p>{createdOrder.discount_description}</p> : null}<p>Payment: {createdOrder.payment_method || createdOrder.payment_mode} · {createdOrder.payment_status}</p><p>Cash: {inr(createdOrder.cash_received || 0)} · Online: {inr(createdOrder.online_received || 0)} · Paid: {inr(createdOrder.paid_amount || 0)} · Remaining: {inr(createdOrder.remaining_amount || 0)} · Change: {inr(createdOrder.change_amount || createdOrder.cash_change || 0)}</p><div className="action-row"><button className="ghost" onClick={() => openInvoice(`/staff/orders/${createdOrder.id}/invoice`)}><Printer size={16} /> Generate / Download Bill</button><button onClick={() => { setCreatedOrder(null); resetOrderForm(); }}>New Order</button></div></section> : null}
       <section className="staff-dashboard-strip">
         {permissions.view_today_orders ? <article className="staff-today-card"><span>Today</span><strong>{staffDashboard.today?.orders || 0}</strong><small>Orders</small></article> : null}
@@ -695,6 +813,8 @@ export default function StaffPage() {
                       {next.includes('ready') && permissions.mark_order_ready_complete ? <button className="ghost" onClick={() => updateStaffOrder(order, 'ready')}>{staffOrderActionLabel('ready')}</button> : null}
                       {next.includes('delivered') && permissions.mark_order_ready_complete ? <button className="ghost" onClick={() => updateStaffOrder(order, 'delivered')}>{staffOrderActionLabel('delivered')}</button> : null}
                       {permissions.edit_orders ? <button className="ghost" onClick={() => editStaffOrder(order)}><Save size={15} /> Edit Order</button> : null}
+                      {permissions.cancel_orders && staffCancellable(order) ? <button className="ghost danger" onClick={() => { if (window.confirm(`Cancel ${order.order_number}?`)) updateStaffOrder(order, 'cancelled'); }}><X size={15} /> Cancel</button> : null}
+                      {permissions.delete_orders ? <button className="ghost danger" onClick={() => deleteStaffOrder(order)}><Trash2 size={15} /> Delete</button> : null}
                       <button className="ghost" onClick={() => openInvoice(`/staff/orders/${order.id}/invoice`)}><Printer size={15} /> Bill</button>
                     </div>
                   </div>
@@ -714,7 +834,7 @@ export default function StaffPage() {
           <div className="staff-menu-toolbar">
             <button className="ghost staff-mobile-category-trigger" onClick={() => setMobileCategoryOpen(true)}><Menu size={18} /> Categories</button>
             <div className="search-box staff-search-box"><Search size={20} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search products, categories or descriptions" /></div>
-            {suggestions.length ? <div className="staff-search-suggestions">{suggestions.map(({ item, category }) => <button key={item.id} onClick={() => selectSuggestion(item)}><strong>{item.name}</strong><span>{category?.name || 'Menu'} · {inr(Math.min(...(item.variants?.length ? item.variants.map(v => Number(v.price)) : [Number(item.price)])))}</span></button>)}</div> : debouncedSearch ? <div className="staff-search-suggestions muted"><p>No matching items found</p></div> : null}
+            {suggestions.length ? <div className="staff-search-suggestions">{suggestions.map(({ item, category }) => <button key={item.id} onClick={() => selectSuggestion(item)}><strong>{item.name}</strong><span>{category?.name || 'Menu'} · {inr(staffStartingPrice(item))}</span></button>)}</div> : debouncedSearch ? <div className="staff-search-suggestions muted"><p>No matching items found</p></div> : null}
           </div>
           <div className="staff-feed-heading">
             <div>
@@ -723,7 +843,7 @@ export default function StaffPage() {
             </div>
             <span className="badge">{visibleItems.length} products</span>
           </div>
-          <div className="staff-product-grid">{visibleItems.map((item, index) => <article id={`staff-product-${item.id}`} className={highlightedProductId === item.id ? 'staff-product-card highlighted' : 'staff-product-card'} key={item.id}><img src={productImage(item, index)} alt="" loading="lazy" /><div className="staff-product-copy"><h3>{item.name}</h3><p>{item.description}</p><strong>From {inr(Math.min(...(item.variants?.length ? item.variants.map(v => Number(v.price)) : [Number(item.price)])))}</strong></div><button onClick={() => add(item)} disabled={Number(item.stock) <= 0}>{Number(item.stock) <= 0 ? 'Sold Out' : 'Add'}</button></article>)}</div>
+          <div className="staff-product-grid">{visibleItems.map((item, index) => <article id={`staff-product-${item.id}`} className={highlightedProductId === item.id ? 'staff-product-card highlighted' : 'staff-product-card'} key={item.id}><img src={productImage(item, index)} alt="" loading="lazy" /><div className="staff-product-copy"><h3>{item.name}</h3><p>{item.description}</p><strong>From {inr(staffStartingPrice(item))}</strong></div><button onClick={() => add(item)} disabled={Number(item.stock) <= 0}>{Number(item.stock) <= 0 ? 'Sold Out' : 'Add'}</button></article>)}</div>
         </section>
         {cartPanel}
       </section>

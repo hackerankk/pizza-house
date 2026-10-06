@@ -415,7 +415,7 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
   }
 
   const selectedOptions = [...(selectedCrust ? [{ ...selectedCrust, group_name: crustGroup?.name || 'Crust' }] : []), ...selectedToppings.map(option => ({ ...option, group_name: toppingGroup?.name || 'Pizza Toppings' }))];
-  const unitPrice = Number(variant?.price ?? item.price) + selectedOptions.reduce((sum, option) => sum + optionPrice(option), 0);
+  const unitPrice = effectiveVariantPrice(item, variant) + selectedOptions.reduce((sum, option) => sum + optionPrice(option), 0);
   const optionIds = selectedOptions.map(option => Number(option.id)).sort((a, b) => a - b);
   const line = {
     ...item,
@@ -458,7 +458,7 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
                 <label className="choice-row" key={v.id}>
                   <input type="radio" name="variant" checked={Number(variant?.id) === Number(v.id)} onChange={() => { setVariantId(v.id); setCrustId('regular'); setToppingIds([]); }} />
                   <span>{variantLabel(v.name)}</span>
-                  <strong>{inr(v.price)}</strong>
+                  <strong>{inr(effectiveVariantPrice(item, v))}</strong>
                 </label>
               ))}
             </div>
@@ -524,6 +524,13 @@ function sizeLabel(name) {
   return name || 'Regular';
 }
 
+function effectiveVariantPrice(item, variant = null) {
+  const productPrice = Number(item?.price || 0);
+  if (!variant) return productPrice;
+  const variantPrice = Number(variant?.price || 0);
+  return variantPrice > 0 ? variantPrice : productPrice;
+}
+
 function BogoFreePizzaModal({ unlock, items, categories, onClose, onAdd }) {
   const modalRef = useRef(null);
   const eligibleItems = useMemo(() => {
@@ -579,11 +586,12 @@ function BogoFreePizzaModal({ unlock, items, categories, onClose, onAdd }) {
   const eligibleCategoryNames = eligibleCategories.map(category => category.name).join(', ') || 'Configured eligible pizza categories';
   const eligibleProductNames = eligibleItems.slice(0, 6).map(item => item.name).join(', ');
   const sizeVariants = (selectedItem?.variants || []).filter(variant => ['S', 'M', 'L'].includes(variant.name));
-  const eligibleVariants = sizeVariants.filter(variant => Number(variant.price) <= Number(unlock.line.price));
+  const eligibleVariants = sizeVariants.filter(variant => effectiveVariantPrice(selectedItem, variant) <= Number(unlock.line.price));
   const selectedVariant = sizeVariants.find(variant => String(variant.id) === String(variantId)) || eligibleVariants[0] || null;
 
   function addFree() {
-    if (!selectedItem || !selectedVariant || Number(selectedVariant.price) > Number(unlock.line.price)) return;
+    const selectedPrice = effectiveVariantPrice(selectedItem, selectedVariant);
+    if (!selectedItem || !selectedVariant || selectedPrice > Number(unlock.line.price)) return;
     const groupId = bogoGroupKey(unlock.line);
     onAdd({
       ...selectedItem,
@@ -592,7 +600,7 @@ function BogoFreePizzaModal({ unlock, items, categories, onClose, onAdd }) {
       variant_name: selectedVariant.name,
       option_ids: [],
       options: [],
-      price: Number(selectedVariant.price),
+      price: selectedPrice,
       quantity: 1,
       is_bogo_free: true,
       bogo_parent_key: groupId,
@@ -627,16 +635,17 @@ function BogoFreePizzaModal({ unlock, items, categories, onClose, onAdd }) {
         </div>
         <div className="bogo-product-grid !grid !grid-cols-2 md:!grid-cols-3 xl:!grid-cols-4">
           {visibleItems.map(item => {
-            const cheapestEligible = (item.variants || []).filter(variant => ['S', 'M', 'L'].includes(variant.name) && Number(variant.price) <= Number(unlock.line.price)).sort((a, b) => Number(a.price) - Number(b.price))[0];
-            return <button key={item.id} className={`${String(selectedItem?.id) === String(item.id) ? 'bogo-product-card active' : 'bogo-product-card'} !grid min-h-[156px] !grid-cols-1 content-start gap-2 p-3 text-left`} onClick={() => { setProductId(item.id); setVariantId(''); }}><span className="aspect-square h-20 w-full overflow-hidden rounded-lg border border-tph-border bg-tph-bg"><img className="!h-full !w-full object-cover" src={productImage(item)} alt="" loading="lazy" /></span><span className="grid gap-1"><strong className="line-clamp-2 text-sm leading-tight">{item.name}</strong><small className="font-extrabold text-tph-primary">{cheapestEligible ? `${inr(cheapestEligible.price)} FREE` : 'No eligible size'}</small></span></button>;
+            const cheapestEligible = (item.variants || []).filter(variant => ['S', 'M', 'L'].includes(variant.name) && effectiveVariantPrice(item, variant) <= Number(unlock.line.price)).sort((a, b) => effectiveVariantPrice(item, a) - effectiveVariantPrice(item, b))[0];
+            return <button key={item.id} className={`${String(selectedItem?.id) === String(item.id) ? 'bogo-product-card active' : 'bogo-product-card'} !grid min-h-[156px] !grid-cols-1 content-start gap-2 p-3 text-left`} onClick={() => { setProductId(item.id); setVariantId(''); }}><span className="aspect-square h-20 w-full overflow-hidden rounded-lg border border-tph-border bg-tph-bg"><img className="!h-full !w-full object-cover" src={productImage(item)} alt="" loading="lazy" /></span><span className="grid gap-1"><strong className="line-clamp-2 text-sm leading-tight">{item.name}</strong><small className="font-extrabold text-tph-primary">{cheapestEligible ? `${inr(effectiveVariantPrice(item, cheapestEligible))} FREE` : 'No eligible size'}</small></span></button>;
           })}
         </div>
         {selectedItem ? <section className="option-section">
           <h3>{selectedItem.name}</h3>
           <div className="bogo-size-grid">
             {sizeVariants.map(variant => {
-              const tooHigh = Number(variant.price) > Number(unlock.line.price);
-              return <button type="button" key={variant.id} className={`${tooHigh ? 'bogo-size-option disabled' : 'bogo-size-option'} ${String(selectedVariant?.id) === String(variant.id) ? 'active !border-tph-primary !ring-2 !ring-tph-primary/20' : ''}`} onClick={() => !tooHigh && setVariantId(variant.id)} disabled={tooHigh}><strong>{sizeLabel(variant.name)}</strong><span>{inr(variant.price)} {tooHigh ? '' : 'FREE'}</span>{tooHigh ? <small>Exceeds {inr(unlock.line.price)} limit</small> : <small>Eligible free size</small>}</button>;
+              const variantPrice = effectiveVariantPrice(selectedItem, variant);
+              const tooHigh = variantPrice > Number(unlock.line.price);
+              return <button type="button" key={variant.id} className={`${tooHigh ? 'bogo-size-option disabled' : 'bogo-size-option'} ${String(selectedVariant?.id) === String(variant.id) ? 'active !border-tph-primary !ring-2 !ring-tph-primary/20' : ''}`} onClick={() => !tooHigh && setVariantId(variant.id)} disabled={tooHigh}><strong>{sizeLabel(variant.name)}</strong><span>{inr(variantPrice)} {tooHigh ? '' : 'FREE'}</span>{tooHigh ? <small>Exceeds {inr(unlock.line.price)} limit</small> : <small>Eligible free size</small>}</button>;
             })}
           </div>
         </section> : <p className="notice warning">No eligible free pizzas are configured for this offer.</p>}
@@ -743,7 +752,7 @@ export default function Home() {
   function startingPrice(item) {
     const variants = item.variants || [];
     if (!variants.length) return Number(item.price || 0);
-    return Math.min(...variants.map(variant => Number(variant.price)));
+    return Math.min(...variants.map(variant => effectiveVariantPrice(item, variant)));
   }
 
   function categoryFallback(name = '') {
@@ -792,7 +801,7 @@ export default function Home() {
       variant_name: variant?.name || null,
       option_ids: [],
       options: [],
-      price: Number(variant?.price ?? item.price),
+      price: effectiveVariantPrice(item, variant),
       quantity: 1
     });
   }
