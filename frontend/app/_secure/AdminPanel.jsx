@@ -682,6 +682,7 @@ export default function AdminPage() {
   const [productImageFile, setProductImageFile] = useState(null);
   const [productImagePreview, setProductImagePreview] = useState('');
   const [productSearch, setProductSearch] = useState('');
+  const [newVariantName, setNewVariantName] = useState('');
   const [productSuggestions, setProductSuggestions] = useState([]);
   const [productSearchOpen, setProductSearchOpen] = useState(false);
   const [productSearchLoading, setProductSearchLoading] = useState(false);
@@ -1144,6 +1145,7 @@ export default function AdminPage() {
       setForm({});
       clearProductImageSelection();
       setEditing(null);
+      setNewVariantName('');
       setMessage('Saved successfully.');
       loadActive();
     } catch (err) {
@@ -1158,6 +1160,9 @@ export default function AdminPage() {
       const sizes = (item.variants || []).filter(v => ['S', 'M', 'L'].includes(v.name) && Number(v.is_active) !== 0);
       next.size_pricing_enabled = sizes.length > 0;
       next.size_prices = Object.fromEntries(sizes.map(v => [v.name, v.price]));
+      const customVariants = (item.variants || []).filter(v => !['S', 'M', 'L'].includes(v.name) && Number(v.is_active) !== 0);
+      next.variant_pricing_enabled = customVariants.length > 0;
+      next.variant_prices = Object.fromEntries(customVariants.map(v => [v.name, v.price]));
     }
     if (active === 'offers') {
       next.applies_to = item.scope === 'category' ? 'category' : 'product';
@@ -1171,6 +1176,7 @@ export default function AdminPage() {
       next.free_product_id = item.free_product_id || (item.scope === 'item' ? item.scope_id : '');
     }
     setForm(next);
+    setNewVariantName('');
     clearProductImageSelection();
     setEditing(item.id);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1881,6 +1887,25 @@ export default function AdminPage() {
       } else if (payload.size_prices !== undefined) {
         payload.size_prices = {};
       }
+      if (payload.variant_pricing_enabled) {
+        const entries = Object.entries(payload.variant_prices || {});
+        if (!entries.length || entries.some(([name, price]) => !String(name || '').trim() || ['S', 'M', 'L'].includes(String(name).trim()) || !Number.isFinite(Number(price)) || Number(price) < 0.01 || Number(price) > 99999999.99)) {
+          throw new Error('Enter a valid name and positive price for every variant. Pizza sizes must use size pricing.');
+        }
+        const cleaned = {};
+        entries.forEach(([name, price]) => { cleaned[String(name).trim()] = Number(price); });
+        const variantNames = Object.keys(cleaned);
+        if (variantNames.length === 1 && variantNames[0] === 'Regular' && payload.price !== undefined && payload.price !== '' && Number.isFinite(Number(payload.price)) && Number(payload.price) > 0) {
+          cleaned.Regular = Number(payload.price);
+        }
+        payload.variant_prices = cleaned;
+        payload.price = payload.price !== undefined && payload.price !== '' ? Math.min(Number(payload.price), ...Object.values(cleaned)) : Math.min(...Object.values(cleaned));
+      } else if (payload.variant_prices !== undefined && payload.variant_pricing_enabled === false && editing) {
+        payload.variant_prices = {};
+      } else {
+        delete payload.variant_prices;
+      }
+      delete payload.variant_pricing_enabled;
       delete payload.size_pricing_enabled;
     }
     if (active === 'offers') {
@@ -2166,6 +2191,26 @@ export default function AdminPage() {
                         <label>Price (INR)<input aria-label={`${label} price`} type="number" min="0.01" max="99999999.99" step="0.01" disabled={!enabled} value={form.size_prices?.[size] ?? ''} onChange={e => setForm({ ...form, size_prices: { ...form.size_prices, [size]: e.target.value } })} /></label>
                       </div>;
                     })}
+                  </div> : null}
+                </fieldset>
+              ) : null}
+              {active === 'products' ? (
+                <fieldset className="my-4 grid gap-3 rounded-lg border border-tph-border p-4">
+                  <legend className="px-2 font-bold">Variant Pricing (Normal / Premium / etc.)</legend>
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(form.variant_pricing_enabled)} onChange={e => setForm({ ...form, variant_pricing_enabled: e.target.checked, variant_prices: form.variant_prices || {} })} />Enable variant pricing (burgers, Regular items)</label>
+                  {form.variant_pricing_enabled ? <div className="grid gap-3">
+                    {Object.entries(form.variant_prices || {}).map(([name, price]) => (
+                      <div key={name} className="grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+                        <label>Variant<input value={name} disabled /></label>
+                        <label>Price (INR)<input aria-label={`${name} price`} type="number" min="0.01" max="99999999.99" step="0.01" value={price ?? ''} onChange={e => setForm({ ...form, variant_prices: { ...form.variant_prices, [name]: e.target.value } })} /></label>
+                        <button type="button" className="ghost danger" onClick={() => { const prices = { ...form.variant_prices }; delete prices[name]; setForm({ ...form, variant_prices: prices }); }}>Remove</button>
+                      </div>
+                    ))}
+                    <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                      <label>New variant name<input placeholder="e.g. Normal, Premium" value={newVariantName} onChange={e => setNewVariantName(e.target.value)} /></label>
+                      <button type="button" className="ghost" onClick={() => { const name = newVariantName.trim(); if (!name || ['S', 'M', 'L'].includes(name)) { setMessage('Enter a valid variant name. Pizza sizes must use size pricing.'); return; } if ((form.variant_prices || {})[name] !== undefined) { setMessage('That variant already exists.'); return; } setForm({ ...form, variant_prices: { ...(form.variant_prices || {}), [name]: '' } }); setNewVariantName(''); }}>Add Variant</button>
+                    </div>
+                    <p className="small-note">A single Regular variant follows the main price field above. For burgers keep Normal and Premium rows with their own prices.</p>
                   </div> : null}
                 </fieldset>
               ) : null}
