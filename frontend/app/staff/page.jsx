@@ -249,7 +249,7 @@ export default function StaffPage() {
   const [highlightedProductId, setHighlightedProductId] = useState(null);
   const [mobileCategoryOpen, setMobileCategoryOpen] = useState(false);
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
-  const [orderType, setOrderType] = useState('dine_in');
+  const [orderType, setOrderType] = useState('takeaway');
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [discountOpen, setDiscountOpen] = useState(false);
   const [discountType, setDiscountType] = useState('none');
@@ -260,6 +260,9 @@ export default function StaffPage() {
   const [onlineReceived, setOnlineReceived] = useState('');
   const [tableNumber, setTableNumber] = useState('');
   const [customer, setCustomer] = useState({ name: '', phone: '', email: '' });
+  const [delivery, setDelivery] = useState({ address: '', latitude: '', longitude: '', distance_km: '' });
+  const [deliveryQuote, setDeliveryQuote] = useState(null);
+  const [deliveryQuoteLoading, setDeliveryQuoteLoading] = useState(false);
   const [customerLookup, setCustomerLookup] = useState(null);
   const [customerLookupLoading, setCustomerLookupLoading] = useState(false);
   const [customerHistoryOpen, setCustomerHistoryOpen] = useState(false);
@@ -272,6 +275,10 @@ export default function StaffPage() {
   const idempotencyKeyRef = useRef('');
   const [posEnabled, setPosEnabled] = useState(true);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setDeliveryQuote(null);
+  }, [cart, discountType, fixedDiscount, selectedOfferId]);
 
   const loadStaffDashboard = useCallback(async () => {
     if (!token('staff')) return;
@@ -460,7 +467,9 @@ export default function StaffPage() {
       ? Math.min(subtotal, subtotal * Math.min(Math.max(Number(fixedDiscount || 0), 0), 100) / 100)
     : discountType === 'bogo' ? bogoPreview.amount : 0;
   const totalDiscount = manualDiscount + explicitBogoDiscount;
-  const finalTotal = Math.max(subtotal - totalDiscount, 0);
+  const discountedSubtotal = Math.max(subtotal - totalDiscount, 0);
+  const quotedDeliveryCharge = orderType === 'delivery' ? Number(deliveryQuote?.delivery_charge || 0) : 0;
+  const finalTotal = orderType === 'delivery' ? Math.max(discountedSubtotal + quotedDeliveryCharge, 0) : discountedSubtotal;
   const cashAmount = paymentMethod === 'cash' ? finalTotal : paymentMethod === 'split' ? Number(cashReceived || 0) : 0;
   const onlineAmount = paymentMethod === 'online' ? finalTotal : paymentMethod === 'split' ? Number(onlineReceived || 0) : 0;
   const totalReceived = cashAmount + onlineAmount;
@@ -484,6 +493,26 @@ export default function StaffPage() {
     if (method !== 'split') {
       setCashReceived('');
       setOnlineReceived('');
+    }
+  }
+
+  async function quoteStaffDelivery() {
+    if (orderType !== 'delivery') return;
+    if (!delivery.latitude || !delivery.longitude) {
+      setDeliveryQuote(null);
+      setMessage('Enter delivery latitude and longitude for an exact quote, or enter the distance — the final charge is calculated by the server on save.');
+      return;
+    }
+    setDeliveryQuoteLoading(true);
+    try {
+      const data = await api('/delivery/quote', { method: 'POST', body: JSON.stringify({ latitude: delivery.latitude, longitude: delivery.longitude, order_amount: Math.max(discountedSubtotal, 0), order_type: 'delivery' }) });
+      setDeliveryQuote(data);
+      setMessage(data.is_free_delivery ? 'Free delivery applies for this order.' : `Delivery charge ${inr(data.delivery_charge)} for ${data.distance_km} km. Final charge is confirmed by the server on save.`);
+    } catch (err) {
+      setDeliveryQuote(null);
+      setMessage(err.message);
+    } finally {
+      setDeliveryQuoteLoading(false);
     }
   }
 
@@ -540,7 +569,9 @@ export default function StaffPage() {
     setEditingOrder(null);
     setEditingOrderId(null);
     idempotencyKeyRef.current = '';
-    setOrderType('dine_in');
+    setOrderType('takeaway');
+    setDelivery({ address: '', latitude: '', longitude: '', distance_km: '' });
+    setDeliveryQuote(null);
     setPaymentMethod('cash');
     setDiscountOpen(false);
     setDiscountType('none');
@@ -605,7 +636,9 @@ export default function StaffPage() {
         return { ...line, bogo_parent_key: fallback.key };
       }));
       setCustomer({ name: data.order.customer_name || '', phone: data.order.customer_phone || '', email: data.order.customer_email || '' });
-      setOrderType(data.order.order_type === 'takeaway' ? 'takeaway' : 'dine_in');
+      setOrderType(['takeaway', 'delivery', 'dine_in'].includes(data.order.order_type) ? data.order.order_type : 'takeaway');
+      setDelivery({ address: data.order.delivery_address || '', latitude: data.order.latitude || '', longitude: data.order.longitude || '', distance_km: data.order.distance_km || '' });
+      setDeliveryQuote(null);
       setPaymentMethod(['cash', 'online', 'split'].includes(data.order.payment_method) ? data.order.payment_method : 'cash');
       setCashReceived(data.order.cash_received || '');
       setOnlineReceived(data.order.online_received || '');
@@ -635,10 +668,21 @@ export default function StaffPage() {
     if (!editingOrderId || !editingOrder) return setMessage('No order is being edited. Your changes were not saved.');
     if (!permissions.edit_orders) return setMessage('You do not have permission to edit orders.');
     if (!cart.length) return setMessage('Edited order must contain at least one item.');
+    if (customer.email.trim() !== '' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer.email.trim())) return setMessage('Enter a valid customer email address or leave it empty.');
+    if (orderType === 'delivery') {
+      if (!delivery.address.trim()) return setMessage('Delivery address is required.');
+      if ((!delivery.latitude || !delivery.longitude) && !delivery.distance_km) return setMessage('Enter delivery coordinates or the delivery distance.');
+    }
     if (['fixed', 'percent', 'bogo'].includes(discountType) && !permissions.apply_manual_discount) return setMessage('You do not have permission to apply discounts.');
     setLoading(true);
     try {
       const payload = {
+        customer_name: customer.name,
+        customer_phone: customer.phone,
+        customer_email: customer.email,
+        order_type: orderType,
+        table_number: orderType === 'dine_in' ? tableNumber : undefined,
+        ...(orderType === 'delivery' ? { delivery_address: delivery.address, latitude: delivery.latitude, longitude: delivery.longitude, distance_km: delivery.distance_km } : {}),
         payment_method: paymentMethod,
         cash_received: paymentMethod === 'split' ? cashReceived : undefined,
         online_received: paymentMethod === 'split' ? onlineReceived : undefined,
@@ -695,6 +739,11 @@ export default function StaffPage() {
     if (!permissions.create_orders) return setMessage('You do not have permission to create orders.');
     if (editingOrderId) return setMessage(`You are editing Order ${editingOrder?.order_number || `#${editingOrderId}`}. Save or cancel the edit before creating a new order.`);
     if (!cart.length) return setMessage('Cart is empty.');
+    if (customer.email.trim() !== '' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer.email.trim())) return setMessage('Enter a valid customer email address or leave it empty.');
+    if (orderType === 'delivery') {
+      if (!delivery.address.trim()) return setMessage('Delivery address is required.');
+      if ((!delivery.latitude || !delivery.longitude) && !delivery.distance_km) return setMessage('Enter delivery coordinates or the delivery distance.');
+    }
     if (cashAmount < 0 || onlineAmount < 0 || Number.isNaN(cashAmount) || Number.isNaN(onlineAmount)) return setMessage('Enter valid payment amounts.');
     if (discountType === 'fixed' && Number(fixedDiscount || 0) > subtotal) return setMessage('Discount cannot exceed subtotal.');
     if (discountType === 'percent' && (Number(fixedDiscount || 0) < 0 || Number(fixedDiscount || 0) > 100)) return setMessage('Percentage discount must be between 0 and 100.');
@@ -707,6 +756,7 @@ export default function StaffPage() {
       const idempotency = idempotencyKeyRef.current;
       const body = {
         order_type: orderType,
+        ...(orderType === 'delivery' ? { delivery_address: delivery.address, latitude: delivery.latitude, longitude: delivery.longitude, distance_km: delivery.distance_km } : {}),
         payment_method: paymentMethod,
         items: cart.map(line => ({ id: line.id, variant_id: line.variant_id, option_ids: line.option_ids || [], quantity: line.quantity, client_key: line.key || '', is_bogo_free: Boolean(line.is_bogo_free), bogo_parent_key: line.bogo_parent_key || '' })),
         cash_received: paymentMethod === 'split' ? cashReceived : undefined,
@@ -796,10 +846,30 @@ export default function StaffPage() {
       </div>
 
       <div className="staff-segmented">
+        <button className={orderType === 'takeaway' ? 'active' : ''} onClick={() => setOrderType('takeaway')}>Takeaway</button>
+        <button className={orderType === 'delivery' ? 'active' : ''} onClick={() => setOrderType('delivery')}>Delivery</button>
         <button className={orderType === 'dine_in' ? 'active' : ''} onClick={() => setOrderType('dine_in')}>Dine-In</button>
+      </div>
+      {/* Superseded duplicate takeaway buttons, kept out of render:
+        <button className={orderType === 'takeaway' ? 'active' : ''} onClick={() => setOrderType('takeaway')}>Takeaway</button>
         <button className={orderType === 'takeaway' ? 'active' : ''} onClick={() => setOrderType('takeaway')}>Takeaway</button>
       </div>
+      */}
       {orderType === 'dine_in' ? <input className="staff-input" placeholder="Table number / seat optional" value={tableNumber} onChange={e => setTableNumber(e.target.value)} /> : null}
+      {orderType === 'delivery' ? (
+        <div className="staff-customer-grid">
+          <textarea className="staff-input staff-textarea" placeholder="Delivery address" aria-label="Delivery address" value={delivery.address} onChange={e => { setDelivery({ ...delivery, address: e.target.value }); setDeliveryQuote(null); }} />
+          <div className="staff-customer-grid two-col">
+            <input className="staff-input" placeholder="Latitude" inputMode="decimal" value={delivery.latitude} onChange={e => { setDelivery({ ...delivery, latitude: e.target.value }); setDeliveryQuote(null); }} />
+            <input className="staff-input" placeholder="Longitude" inputMode="decimal" value={delivery.longitude} onChange={e => { setDelivery({ ...delivery, longitude: e.target.value }); setDeliveryQuote(null); }} />
+          </div>
+          <input className="staff-input" placeholder="Distance (km) — if coordinates unknown" inputMode="decimal" value={delivery.distance_km} onChange={e => { setDelivery({ ...delivery, distance_km: e.target.value }); setDeliveryQuote(null); }} />
+          <div className="action-row">
+            <button className="ghost" onClick={quoteStaffDelivery} disabled={deliveryQuoteLoading || !cart.length}>{deliveryQuoteLoading ? 'Calculating...' : 'Calculate Delivery'}</button>
+          </div>
+          {deliveryQuote ? <p className="small-note">{deliveryQuote.is_free_delivery ? `FREE DELIVERY · ${deliveryQuote.distance_km} km · ${deliveryQuote.message || ''}` : `Delivery ${inr(deliveryQuote.delivery_charge)} · ${deliveryQuote.distance_km} km`}</p> : <p className="small-note">Enter coordinates and tap Calculate Delivery for an exact quote, or enter the distance — the server confirms the final charge on save.</p>}
+        </div>
+      ) : null}
 
       <div className="staff-customer-grid">
         <input className="staff-input" placeholder="Customer name optional" value={customer.name} onChange={e => setCustomer({ ...customer, name: e.target.value })} />
@@ -873,9 +943,9 @@ export default function StaffPage() {
         ) : null}
         <span className="eyebrow">Payment</span>
         <div className="payment-options staff-payment-options">
-          <label className={paymentMethod === 'cash' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'cash'} disabled={editingOrderId != null} onChange={() => choosePaymentMethod('cash')} />Cash</label>
-          <label className={paymentMethod === 'online' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'online'} disabled={editingOrderId != null} onChange={() => choosePaymentMethod('online')} />Online</label>
-          <label className={paymentMethod === 'split' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'split'} disabled={editingOrderId != null} onChange={() => choosePaymentMethod('split')} />Split</label>
+          <label className={paymentMethod === 'cash' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'cash'} onChange={() => choosePaymentMethod('cash')} />Cash</label>
+          <label className={paymentMethod === 'online' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'online'} onChange={() => choosePaymentMethod('online')} />Online</label>
+          <label className={paymentMethod === 'split' ? 'payment-card selected' : 'payment-card'}><input type="radio" checked={paymentMethod === 'split'} onChange={() => choosePaymentMethod('split')} />Split</label>
         </div>
         {paymentMethod === 'cash' ? (
           <div className="staff-auto-payment-card">
@@ -895,7 +965,7 @@ export default function StaffPage() {
           <>
             <input className="staff-input" type="number" min="0" step="0.01" placeholder="Cash received" value={cashReceived} disabled={editingOrderId != null} onChange={e => setCashReceived(e.target.value)} />
             <input className="staff-input" type="number" min="0" step="0.01" placeholder="Online received" value={onlineReceived} disabled={editingOrderId != null} onChange={e => setOnlineReceived(e.target.value)} />
-            <p className="small-note">Only split payment uses manual amounts. Counter online means UPI/card/bank app collected at the counter.</p>
+            <p className="small-note">Only split payment uses manual amounts. Counter online means UPI/card/bank app collected at the counter.{editingOrderId != null ? ' Recorded received amounts stay unchanged while editing; only the remaining balance is recomputed.' : ''}</p>
           </>
         ) : null}
       </div>
@@ -905,11 +975,21 @@ export default function StaffPage() {
           <div><span>Subtotal</span><strong>{inr(subtotal)}</strong></div>
           {explicitBogoDiscount > 0 ? <div><span>BOGO Discount</span><strong>-{inr(explicitBogoDiscount)}</strong></div> : null}
           <div><span>Discount</span><strong>{manualDiscount > 0 ? `-${inr(manualDiscount)}` : inr(0)}</strong></div>
-          <div className="grand"><span>Final Total</span><strong>{inr(finalTotal)}</strong></div>
+          {orderType === 'delivery' ? <div><span>Delivery Charge</span><strong>{deliveryQuote ? inr(quotedDeliveryCharge) : 'On save'}</strong></div> : null}
+          <div className="grand"><span>Grand Total</span><strong>{inr(finalTotal)}</strong></div>
           <div><span>Total Received</span><strong>{inr(totalReceived)}</strong></div>
           <div><span>Paid</span><strong>{inr(paidNow)}</strong></div>
           <div><span>Remaining</span><strong>{inr(remaining)}</strong></div>
           <div><span>Change</span><strong>{inr(change)}</strong></div>
+        </div>
+      ) : null}
+      {orderType === 'delivery' && paymentMethod !== 'split' ? (
+        <div className="payment-breakdown staff-payment-breakdown">
+          <div><span>Subtotal</span><strong>{inr(subtotal)}</strong></div>
+          {explicitBogoDiscount > 0 ? <div><span>BOGO Discount</span><strong>-{inr(explicitBogoDiscount)}</strong></div> : null}
+          <div><span>Discount</span><strong>{manualDiscount > 0 ? `-${inr(manualDiscount)}` : inr(0)}</strong></div>
+          <div><span>Delivery Charge</span><strong>{deliveryQuote ? inr(quotedDeliveryCharge) : 'On save'}</strong></div>
+          <div className="grand"><span>Grand Total</span><strong>{inr(finalTotal)}</strong></div>
         </div>
       ) : null}
       <button className="full-width staff-place-order" onClick={submitOrderForm} disabled={loading || !cart.length || (!editingOrderId && !permissions.create_orders) || (editingOrderId && !permissions.edit_orders)}>{editingOrderId ? <Save size={18} /> : <CreditCard size={18} />} {loading ? (editingOrderId ? 'Saving...' : 'Creating...') : editingOrderId ? (permissions.edit_orders ? 'Save Edited Order' : 'Edit Disabled') : permissions.create_orders ? 'Place Order' : 'Create Order Disabled'}</button>
@@ -949,12 +1029,12 @@ export default function StaffPage() {
         <div><strong>The Pizza House POS</strong><span>{new Date().toLocaleString()}</span></div>
         <div className="staff-header-status">
           <span className="badge success">{staff.name}</span>
-          <span className="badge warning">{orderType === 'dine_in' ? 'DINE-IN' : 'TAKEAWAY'}</span>
+          <span className="badge warning">{orderType === 'dine_in' ? 'DINE-IN' : orderType === 'delivery' ? 'DELIVERY' : 'TAKEAWAY'}</span>
           <button className="ghost" onClick={() => { clearToken('staff'); setStaff(null); }}><LogOut size={16} /> Logout</button>
         </div>
       </header>
       {message ? <p className="notice error" role="alert" aria-live="polite">{message}</p> : null}
-      {createdOrder ? <section className="staff-success-card"><h2>{lastOrderAction === 'updated' ? 'Order Updated Successfully' : 'Order Created Successfully'}</h2><p><strong>{createdOrder.order_number}</strong></p><p>Subtotal: {inr(createdOrder.subtotal)} · Discount: {inr(createdOrder.discount_amount || 0)} · Total: {inr(createdOrder.total_amount)}</p>{createdOrder.discount_description ? <p>{createdOrder.discount_description}</p> : null}<p>Payment: {createdOrder.payment_method || createdOrder.payment_mode} · {createdOrder.payment_status}</p><p>Cash: {inr(createdOrder.cash_received || 0)} · Online: {inr(createdOrder.online_received || 0)} · Paid: {inr(createdOrder.paid_amount || 0)} · Remaining: {inr(createdOrder.remaining_amount || 0)} · Change: {inr(createdOrder.change_amount || createdOrder.cash_change || 0)}</p><div className="action-row"><button className="ghost" onClick={() => openInvoice(`/staff/orders/${createdOrder.id}/invoice`)}><Printer size={16} /> Generate / Download Bill</button><button onClick={() => { setCreatedOrder(null); resetOrderForm(); }}>New Order</button></div></section> : null}
+      {createdOrder ? <section className="staff-success-card"><h2>{lastOrderAction === 'updated' ? 'Order Updated Successfully' : 'Order Created Successfully'}</h2><p><strong>{createdOrder.order_number}</strong></p><p>Subtotal: {inr(createdOrder.subtotal)} · Discount: {inr(createdOrder.discount_amount || 0)}{createdOrder.order_type === 'delivery' ? ` · Delivery: ${inr(createdOrder.delivery_charge || 0)}` : ''} · Total: {inr(createdOrder.total_amount)}</p>{createdOrder.discount_description ? <p>{createdOrder.discount_description}</p> : null}{createdOrder.order_type === 'delivery' && createdOrder.delivery_address ? <p>Deliver to: {createdOrder.delivery_address}</p> : null}<p>Payment: {createdOrder.payment_method || createdOrder.payment_mode} · {createdOrder.payment_status}</p><p>Cash: {inr(createdOrder.cash_received || 0)} · Online: {inr(createdOrder.online_received || 0)} · Paid: {inr(createdOrder.paid_amount || 0)} · Remaining: {inr(createdOrder.remaining_amount || 0)} · Change: {inr(createdOrder.change_amount || createdOrder.cash_change || 0)}</p><div className="action-row"><button className="ghost" onClick={() => openInvoice(`/staff/orders/${createdOrder.id}/invoice`)}><Printer size={16} /> Generate / Download Bill</button><button onClick={() => { setCreatedOrder(null); resetOrderForm(); }}>New Order</button></div></section> : null}
       <section className="staff-dashboard-strip">
         {permissions.view_today_orders ? <article className="staff-today-card"><span>Today</span><strong>{staffDashboard.today?.orders || 0}</strong><small>Orders</small></article> : null}
         {permissions.view_current_orders ? (
@@ -966,7 +1046,7 @@ export default function StaffPage() {
                 return (
                   <div className="staff-current-order-card" key={order.id}>
                     <div><strong>{order.order_number}</strong><span>{order.customer_name || 'Walk-in customer'} {order.customer_phone ? `· ${order.customer_phone}` : ''}</span></div>
-                    <div><span>{order.order_type === 'dine_in' ? 'Dine-in' : 'Takeaway'} · Staff</span><strong>{inr(order.total_amount)}</strong></div>
+                    <div><span>{order.order_type === 'dine_in' ? 'Dine-in' : order.order_type === 'delivery' ? 'Delivery' : 'Takeaway'} · Staff</span><strong>{inr(order.total_amount)}</strong>{order.order_type === 'delivery' && order.delivery_address ? <small>{order.delivery_address}</small> : null}</div>
                     <div><span>{order.payment_status}</span><small>Paid {inr(order.paid_amount || 0)} · Remaining {inr(order.remaining_amount || 0)}</small></div>
                     <div><span>Status</span><strong>{order.status === 'received' ? 'Created' : order.status === 'accepted' ? 'Confirmed' : order.status === 'delivered' ? 'Completed' : order.status.replaceAll('_', ' ')}</strong></div>
                     <div className="action-row">
@@ -985,7 +1065,7 @@ export default function StaffPage() {
           </article>
         ) : null}
       </section>
-      {editingOrderId && editingOrder ? <section className="staff-success-card staff-editing-banner"><h2>Editing {editingOrder.order_number}</h2><p>Update products, quantities, sizes, or add-ons in the cart. The backend will recalculate totals, stock, coupons, BOGO, and remaining amount when you save. Verified payments stay unchanged; only the remaining balance is recomputed. To change a burger option or pizza size, remove the line and re-add it with the new option.</p><div className="action-row"><button className="ghost" onClick={resetOrderForm}>Cancel Edit</button></div></section> : null}
+      {editingOrderId && editingOrder ? <section className="staff-success-card staff-editing-banner"><h2>Editing {editingOrder.order_number}</h2><p>Update products, customer details, order type, delivery address, or payment method. The backend will recalculate totals, stock, coupons, BOGO, delivery charge, and remaining amount when you save. Verified payments stay unchanged; only the remaining balance is recomputed. To change a burger option or pizza size, remove the line and re-add it with the new option.</p><div className="action-row"><button className="ghost" onClick={resetOrderForm}>Cancel Edit</button></div></section> : null}
       <section className="staff-pos-layout">
         <aside className="staff-category-panel">
           <h2>Categories</h2>

@@ -2148,16 +2148,23 @@ export default function AdminPage() {
         {message ? <p className="notice success">{message}</p> : null}
 
         {active === 'dashboard' && (
+          <div>
+            <div className="panel-heading"><h2>Today&apos;s Sales</h2><p>{stats?.today_date || ''} · Collected sales (paid amounts) · Asia/Kolkata</p></div>
           <div className="stat-grid">
-            {stats ? Object.entries(stats).map(([key, value]) => (
-              <article className="stat-card" key={key}>
-                <p>{key.replaceAll('_', ' ')}</p>
-                <h2>{key.includes('revenue') || key.includes('payments') ? inr(value) : value}</h2>
+              <article className="stat-card"><p>Today&apos;s Total Sales</p><h2>{stats ? inr(stats.today_total_sales || 0) : '…'}</h2><small>{stats ? `${stats.today_orders_count || 0} orders today` : 'Loading dashboard...'}</small></article>
+              <article className="stat-card"><p>Takeaway Sales</p><h2>{stats ? inr(stats.today_takeaway_sales || 0) : '…'}</h2><small>{stats ? `${stats.today_takeaway_orders || 0} takeaway orders` : ''}</small></article>
+              <article className="stat-card"><p>Delivery Sales</p><h2>{stats ? inr(stats.today_delivery_sales || 0) : '…'}</h2><small>{stats ? `${stats.today_delivery_orders || 0} delivery orders` : ''}</small></article>
+            </div>
+            <div className="action-row"><button className="ghost" onClick={() => setActive('reports-sales')}>View detailed reports</button></div>
+          </div>
+        )}
+        {/* Legacy generic dashboard cards removed; historical analytics live in Sales Report.
               </article>
             )) : <div className="empty-state">Loading dashboard...</div>}
           </div>
         )}
 
+        */}
         {resources[active] && active !== 'delivery-slabs' && (
           <div className={active === 'products' ? 'admin-content-grid products-management-grid' : 'admin-content-grid'}>
             <section className="panel">

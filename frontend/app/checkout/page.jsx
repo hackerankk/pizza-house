@@ -605,7 +605,7 @@ function CheckoutContent() {
             {!customerSession && !customerLoginRequired && guestCheckoutEnabled ? <div className="form-grid two">
               <input placeholder="Name" value={customer.name} onChange={e => setCustomer({ ...customer, name: e.target.value })} />
               <input placeholder="Mobile number" value={customer.phone} onChange={e => setCustomer({ ...customer, phone: e.target.value })} />
-              <input placeholder="Email" value={customer.email} onChange={e => setCustomer({ ...customer, email: e.target.value })} />
+              <input type="email" placeholder="Email (Optional)" aria-label="Email (Optional)" value={customer.email} onChange={e => setCustomer({ ...customer, email: e.target.value })} />
             </div> : null}
           </section>
 
