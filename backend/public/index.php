@@ -2853,44 +2853,27 @@ function validated_size_prices(array $data): ?array {
     return $prices;
 }
 
-<<<<<<< HEAD
-function validated_product_variant_prices(array $data): ?array {
-    if (!array_key_exists('variant_prices', $data)) return null;
-    if (!is_array($data['variant_prices'])) json_response(['error' => 'Variant prices must be an object'], 422);
-    $prices = [];
-    foreach ($data['variant_prices'] as $variant => $price) {
-        if (!in_array($variant, ['Normal', 'Premium'], true) || !is_numeric($price) || !is_finite((float)$price) || (float)$price <= 0 || (float)$price > 99999999.99) {
-            json_response(['error' => 'Each enabled variant needs a valid positive price'], 422);
-        }
-        $prices[$variant] = round((float)$price, 2);
-        if ($prices[$variant] <= 0) json_response(['error' => 'Variant prices must be at least 0.01'], 422);
-=======
 function validated_variant_prices(array $data): ?array {
     if (!array_key_exists('variant_prices', $data)) return null;
     if (!is_array($data['variant_prices'])) json_response(['error' => 'Variant prices must be an object'], 422);
     $prices = [];
     foreach ($data['variant_prices'] as $name => $price) {
         $name = trim((string)$name);
-        if ($name === '' || strlen($name) > 80 || in_array($name, ['S', 'M', 'L'], true)) {
+        if ($name === '' || strlen($name) > 80 || in_array(strtoupper($name), ['S', 'M', 'L'], true)) {
             json_response(['error' => 'Invalid variant name. Pizza sizes must use size prices.'], 422);
         }
         if (!is_numeric($price) || !is_finite((float)$price) || (float)$price <= 0 || (float)$price > 99999999.99) {
             json_response(['error' => 'Each variant needs a valid positive price'], 422);
         }
+        foreach (array_keys($prices) as $existingName) {
+            if (strcasecmp((string)$existingName, $name) === 0) json_response(['error' => 'Variant names must be unique'], 422);
+        }
         $prices[$name] = round((float)$price, 2);
         if ($prices[$name] <= 0) json_response(['error' => 'Variant prices must be at least 0.01'], 422);
->>>>>>> 5b30ec521bbc6c26170d6027227c240c45c2054e
     }
     return $prices;
 }
 
-<<<<<<< HEAD
-function save_product_named_variant_prices(int $productId, array $prices, array $names): void {
-    if (!$names) return;
-    // Keep variant IDs and historical order references when a variant is disabled.
-    $placeholders = implode(',', array_fill(0, count($names), '?'));
-    db()->prepare("UPDATE menu_item_variants SET is_active=0, is_default=0 WHERE menu_item_id=? AND name IN ($placeholders)")->execute([$productId, ...$names]);
-=======
 function save_product_variant_prices(int $productId, array $prices): void {
     // Keep variant IDs and historical order references when a variant is disabled.
     db()->prepare("UPDATE menu_item_variants SET is_active=0, is_default=0 WHERE menu_item_id=? AND name NOT IN ('S','M','L')")->execute([$productId]);
@@ -2907,22 +2890,13 @@ function save_product_variant_prices(int $productId, array $prices): void {
 function save_product_size_prices(int $productId, array $prices): void {
     // Keep variant IDs and historical order references when a size is disabled.
     db()->prepare("UPDATE menu_item_variants SET is_active=0, is_default=0 WHERE menu_item_id=? AND name IN ('S','M','L')")->execute([$productId]);
->>>>>>> 5b30ec521bbc6c26170d6027227c240c45c2054e
     $stmt = db()->prepare('INSERT INTO menu_item_variants (menu_item_id,name,price,sort_order,is_default,is_active) VALUES (?,?,?,?,?,1) ON DUPLICATE KEY UPDATE price=VALUES(price),sort_order=VALUES(sort_order),is_default=VALUES(is_default),is_active=1');
     $first = true;
-    foreach ($names as $index => $name) {
-        if (!array_key_exists($name, $prices)) continue;
-        $stmt->execute([$productId, $name, $prices[$name], $index, $first ? 1 : 0]);
+    foreach (['S', 'M', 'L'] as $index => $size) {
+        if (!array_key_exists($size, $prices)) continue;
+        $stmt->execute([$productId, $size, $prices[$size], $index, $first ? 1 : 0]);
         $first = false;
     }
-}
-
-function save_product_size_prices(int $productId, array $prices): void {
-    save_product_named_variant_prices($productId, $prices, ['S', 'M', 'L']);
-}
-
-function save_product_variant_prices(int $productId, array $prices): void {
-    save_product_named_variant_prices($productId, $prices, ['Normal', 'Premium']);
 }
 
 function validate_admin_resource(string $name, array &$payload): void {
@@ -4387,7 +4361,6 @@ if (str_starts_with($path, '/admin')) {
         json_response(['result' => delivery_rule_result((float)$data['order_amount'], (float)$data['distance_km'], $orderType)]);
     }
     foreach ($resources as $name => $meta) {
-        $requestVariantPrices = ($name === 'products' && str_starts_with($path, '/admin/products')) ? validated_variant_prices($data) : null;
         if ($path === '/admin/' . $name && $method === 'GET') {
             $pagination = pagination_params();
             $stmt = paginated_query('SELECT * FROM ' . $meta['table'] . ' ORDER BY id DESC LIMIT ? OFFSET ?', [], $pagination);
@@ -4405,7 +4378,7 @@ if (str_starts_with($path, '/admin')) {
         }
         if ($path === '/admin/' . $name && $method === 'POST') {
             $sizePrices = $name === 'products' ? validated_size_prices($data) : null;
-            $variantPrices = $name === 'products' ? validated_product_variant_prices($data) : null;
+            $variantPrices = $name === 'products' ? validated_variant_prices($data) : null;
             $payload = array_intersect_key($data, array_flip($meta['fields']));
             $pricedVariants = array_merge($sizePrices ?? [], $variantPrices ?? []);
             if ($pricedVariants) $payload['price'] = min($pricedVariants);
@@ -4416,7 +4389,6 @@ if (str_starts_with($path, '/admin')) {
             if (!$payload) json_response(['error' => 'No valid fields supplied'], 422);
             if ($name === 'promotional-banners' && empty($payload['image_url'])) json_response(['error' => 'Banner image is required'], 422);
             validate_admin_resource($name, $payload);
-            if ($name === 'products' && $requestVariantPrices) $payload['price'] = isset($payload['price']) ? min((float)$payload['price'], min($requestVariantPrices)) : min($requestVariantPrices);
             $cols = array_keys($payload);
             $sql = 'INSERT INTO ' . $meta['table'] . ' (' . implode(',', $cols) . ') VALUES (' . implode(',', array_fill(0, count($cols), '?')) . ')';
             $pdo = db();
@@ -4425,11 +4397,7 @@ if (str_starts_with($path, '/admin')) {
                 $pdo->prepare($sql)->execute(array_values($payload));
                 $createdId = (int)$pdo->lastInsertId();
                 if ($sizePrices !== null) save_product_size_prices($createdId, $sizePrices);
-<<<<<<< HEAD
                 if ($variantPrices !== null) save_product_variant_prices($createdId, $variantPrices);
-=======
-                if ($requestVariantPrices !== null) save_product_variant_prices($createdId, $requestVariantPrices);
->>>>>>> 5b30ec521bbc6c26170d6027227c240c45c2054e
                 $pdo->commit();
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
@@ -4440,7 +4408,7 @@ if (str_starts_with($path, '/admin')) {
         if (preg_match('#^/admin/' . preg_quote($name, '#') . '/(\d+)$#', $path, $m)) {
             if ($method === 'PUT') {
                 $sizePrices = $name === 'products' ? validated_size_prices($data) : null;
-                $variantPrices = $name === 'products' ? validated_product_variant_prices($data) : null;
+                $variantPrices = $name === 'products' ? validated_variant_prices($data) : null;
                 $payload = array_intersect_key($data, array_flip($meta['fields']));
                 $pricedVariants = array_merge($sizePrices ?? [], $variantPrices ?? []);
                 if ($pricedVariants) $payload['price'] = min($pricedVariants);
@@ -4456,18 +4424,13 @@ if (str_starts_with($path, '/admin')) {
                     $previousStmt->execute([(int)$m[1]]);
                     $previousImage = $previousStmt->fetchColumn() ?: null;
                 }
-                if ($name === 'products' && $requestVariantPrices) $payload['price'] = isset($payload['price']) ? min((float)$payload['price'], min($requestVariantPrices)) : min($requestVariantPrices);
                 $sets = implode(',', array_map(fn($c) => "$c=?", array_keys($payload)));
                 $pdo = db();
                 $pdo->beginTransaction();
                 try {
                     $pdo->prepare('UPDATE ' . $meta['table'] . " SET $sets WHERE id=?")->execute([...array_values($payload), (int)$m[1]]);
                     if ($sizePrices !== null) save_product_size_prices((int)$m[1], $sizePrices);
-<<<<<<< HEAD
                     if ($variantPrices !== null) save_product_variant_prices((int)$m[1], $variantPrices);
-=======
-                    if ($requestVariantPrices !== null) save_product_variant_prices((int)$m[1], $requestVariantPrices);
->>>>>>> 5b30ec521bbc6c26170d6027227c240c45c2054e
                     $pdo->commit();
                 } catch (Throwable $e) {
                     if ($pdo->inTransaction()) $pdo->rollBack();
