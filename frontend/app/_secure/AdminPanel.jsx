@@ -75,6 +75,7 @@ const fieldOptions = {
 const prepOptions = [10, 15, 20, 30];
 const weekDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
 const pizzaSizes = [['S', 'Small'], ['M', 'Medium'], ['L', 'Large']];
+const burgerVariants = [['Normal', 'Normal'], ['Premium', 'Premium']];
 const orderNotificationTones = [
   ['classic_bell', 'Classic Bell'],
   ['soft_chime', 'Soft Chime'],
@@ -1156,8 +1157,11 @@ export default function AdminPage() {
     resourceFields.forEach(field => { next[field] = item[field] ?? ''; });
     if (active === 'products') {
       const sizes = (item.variants || []).filter(v => ['S', 'M', 'L'].includes(v.name) && Number(v.is_active) !== 0);
+      const variants = (item.variants || []).filter(v => ['Normal', 'Premium'].includes(v.name) && Number(v.is_active) !== 0);
       next.size_pricing_enabled = sizes.length > 0;
       next.size_prices = Object.fromEntries(sizes.map(v => [v.name, v.price]));
+      next.variant_pricing_enabled = variants.length > 0;
+      next.variant_prices = Object.fromEntries(variants.map(v => [v.name, v.price]));
     }
     if (active === 'offers') {
       next.applies_to = item.scope === 'category' ? 'category' : 'product';
@@ -1872,16 +1876,28 @@ export default function AdminPage() {
   function normalizedResourcePayload() {
     const payload = { ...form };
     if (active === 'products') {
+      const priceCandidates = [];
       if (payload.size_pricing_enabled) {
         const prices = Object.values(payload.size_prices || {});
         if (!prices.length || prices.some(price => !Number.isFinite(Number(price)) || Number(price) < 0.01 || Number(price) > 99999999.99)) {
           throw new Error('Enable at least one size and enter a positive price for every enabled size.');
         }
-        payload.price = Math.min(...prices.map(Number));
+        priceCandidates.push(...prices.map(Number));
       } else if (payload.size_prices !== undefined) {
         payload.size_prices = {};
       }
+      if (payload.variant_pricing_enabled) {
+        const prices = Object.values(payload.variant_prices || {});
+        if (!prices.length || prices.some(price => !Number.isFinite(Number(price)) || Number(price) < 0.01 || Number(price) > 99999999.99)) {
+          throw new Error('Enable at least one variant and enter a positive price for every enabled variant.');
+        }
+        priceCandidates.push(...prices.map(Number));
+      } else if (payload.variant_prices !== undefined) {
+        payload.variant_prices = {};
+      }
+      if (priceCandidates.length) payload.price = Math.min(...priceCandidates);
       delete payload.size_pricing_enabled;
+      delete payload.variant_pricing_enabled;
     }
     if (active === 'offers') {
       const offerType = payload.offer_type || 'fixed';
@@ -2164,6 +2180,20 @@ export default function AdminPage() {
                           setForm({ ...form, size_prices: prices });
                         }} />{label}</label>
                         <label>Price (INR)<input aria-label={`${label} price`} type="number" min="0.01" max="99999999.99" step="0.01" disabled={!enabled} value={form.size_prices?.[size] ?? ''} onChange={e => setForm({ ...form, size_prices: { ...form.size_prices, [size]: e.target.value } })} /></label>
+                      </div>;
+                    })}
+                  </div> : null}
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(form.variant_pricing_enabled)} onChange={e => setForm({ ...form, variant_pricing_enabled: e.target.checked, variant_prices: form.variant_prices || {} })} />Enable burger variant pricing</label>
+                  {form.variant_pricing_enabled ? <div className="grid gap-3 sm:grid-cols-2">
+                    {burgerVariants.map(([variant, label]) => {
+                      const enabled = Object.prototype.hasOwnProperty.call(form.variant_prices || {}, variant);
+                      return <div key={variant} className="grid gap-2">
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={enabled} onChange={e => {
+                          const prices = { ...form.variant_prices };
+                          if (e.target.checked) prices[variant] = ''; else delete prices[variant];
+                          setForm({ ...form, variant_prices: prices });
+                        }} />{label}</label>
+                        <label>Price (INR)<input aria-label={`${label} price`} type="number" min="0.01" max="99999999.99" step="0.01" disabled={!enabled} value={form.variant_prices?.[variant] ?? ''} onChange={e => setForm({ ...form, variant_prices: { ...form.variant_prices, [variant]: e.target.value } })} /></label>
                       </div>;
                     })}
                   </div> : null}

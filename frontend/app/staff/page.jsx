@@ -12,11 +12,20 @@ function optionPrice(option, variantName) {
 }
 
 function StaffOptionModal({ item, optionGroups, onClose, onAdd }) {
-  const variants = item?.variants || [];
+  const variants = useMemo(() => item?.variants || [], [item?.variants]);
+  const variantSignature = variants.map(v => `${v.id}:${v.name}:${v.is_default}`).join('|');
   const firstVariant = variants.find(v => Number(v.is_default) === 1) || variants[0] || null;
   const [variantId, setVariantId] = useState(firstVariant?.id || null);
   const [selectedOptions, setSelectedOptions] = useState([]);
   const [quantity, setQuantity] = useState(1);
+
+  useEffect(() => {
+    const nextFirstVariant = variants.find(v => Number(v.is_default) === 1) || variants[0] || null;
+    setVariantId(nextFirstVariant?.id || null);
+    setSelectedOptions([]);
+    setQuantity(1);
+  }, [item?.id, variantSignature, variants]);
+
   if (!item) return null;
   const variant = variants.find(v => Number(v.id) === Number(variantId)) || firstVariant;
   const isPizza = ['S', 'M', 'L'].includes(variant?.name);
