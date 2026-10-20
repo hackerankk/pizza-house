@@ -297,6 +297,7 @@ function CheckoutContent() {
   }
 
   function qty(key, delta) {
+    setPreview(null);
     setCart(current => {
       const target = current.find(line => (line.key || line.id) === key);
       if (!target) return current;
@@ -604,7 +605,7 @@ function CheckoutContent() {
             {!customerSession && !customerLoginRequired && guestCheckoutEnabled ? <div className="form-grid two">
               <input placeholder="Name" value={customer.name} onChange={e => setCustomer({ ...customer, name: e.target.value })} />
               <input placeholder="Mobile number" value={customer.phone} onChange={e => setCustomer({ ...customer, phone: e.target.value })} />
-              <input placeholder="Email" value={customer.email} onChange={e => setCustomer({ ...customer, email: e.target.value })} />
+              <input type="email" placeholder="Email (Optional)" aria-label="Email (Optional)" value={customer.email} onChange={e => setCustomer({ ...customer, email: e.target.value })} />
             </div> : null}
           </section>
 
@@ -694,7 +695,7 @@ function CheckoutContent() {
           </div>
           <div className="totals">
             <div><span>Subtotal</span><strong>{inr(preview?.subtotal ?? subtotal)}</strong></div>
-            <div><span>Coupon Discount</span><strong>-{inr(preview?.coupon_discount ?? preview?.discount ?? 0)}</strong></div>
+            <div><span>Coupon Discount</span><strong>-{inr(preview?.coupon_discount ?? 0)}</strong></div>
             <div><span>BOGO Discount</span><strong>-{inr(preview?.bogo_discount ?? 0)}</strong></div>
             {preview?.bogo_details?.length ? <div className="bogo-detail-row"><span>Free Items</span><strong>{preview.bogo_details.map(row => `${row.free_quantity} x ${row.item} ${row.size}`).join(', ')}</strong></div> : null}
             {orderType === 'delivery' ? <div><span>Delivery Charge</span><strong>{preview?.delivery?.is_free_delivery ? 'FREE' : inr(preview?.delivery?.delivery_charge ?? 0)}</strong></div> : null}

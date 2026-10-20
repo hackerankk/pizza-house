@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronRight, CreditCard, LogOut, Menu, Minus, Plus, Printer, Save, Search, Trash2, Utensils, X } from 'lucide-react';
 import { api, clearToken, inr, openInvoice, productImage, setToken, token } from '../lib';
 
@@ -58,6 +58,65 @@ function StaffOptionModal({ item, optionGroups, onClose, onAdd }) {
   );
 }
 
+function staffBogoSizeCode(name = '') {
+  if (name === 'S' || String(name).toLowerCase().includes('small')) return 'S';
+  if (name === 'M' || String(name).toLowerCase().includes('medium')) return 'M';
+  if (name === 'L' || String(name).toLowerCase().includes('large')) return 'L';
+  return String(name || '').toUpperCase();
+}
+
+function staffBogoCapacity(offer, paidQty) {
+  const buy = Math.max(1, Number(offer?.buy_qty || 1));
+  const get = Math.max(1, Number(offer?.get_qty || 1));
+  return Math.floor(Math.max(Number(paidQty || 0), 0) / buy) * get;
+}
+
+function staffBogoMappedFreeSize(offer, paidVariantName, weekday) {
+  const rules = offer?.size_rules || {};
+  const dayRules = (weekday && rules[weekday]) || rules.default || rules;
+  if (!dayRules || !Object.keys(dayRules).length) return '';
+  const mapped = dayRules[staffBogoSizeCode(paidVariantName)];
+  return mapped ? staffBogoSizeCode(mapped) : '';
+}
+
+function reconcileStaffBogoCart(lines = [], offerForLine = null) {
+  const paidByKey = new Map();
+  lines.forEach(line => { if (!line.is_bogo_free) paidByKey.set(String(line.key || line.id), line); });
+  const used = new Map();
+  const out = [];
+  lines.forEach(line => {
+    if (!line.is_bogo_free) {
+      out.push(line);
+      return;
+    }
+    const parentKey = String(line.bogo_parent_key || '');
+    const paid = paidByKey.get(parentKey);
+    if (!paid) return;
+    let capacity = Number(paid.quantity || 0);
+    if (offerForLine) {
+      const offer = offerForLine(paid);
+      if (!offer || Number(line.price) > Number(paid.price)) return;
+      capacity = staffBogoCapacity(offer, paid.quantity);
+    }
+    const already = used.get(parentKey) || 0;
+    if (already >= capacity) return;
+    const quantity = Math.min(Number(line.quantity || 1), capacity - already);
+    used.set(parentKey, already + quantity);
+    out.push({ ...line, quantity });
+  });
+  return out;
+}
+
+function repriceStaffLine(line, freshItems, freshGroups) {
+  const item = (freshItems || []).find(row => String(row.id) === String(line.id));
+  if (!item) return line;
+  const variant = (item.variants || []).find(v => String(v.id) === String(line.variant_id)) || (item.variants || []).find(v => Number(v.is_default) === 1) || (item.variants || [])[0] || null;
+  const optionsById = new Map((freshGroups || []).flatMap(group => (group.options || []).map(option => [String(option.id), { ...option, group_name: group.name }])));
+  const options = (line.option_ids || []).map(id => optionsById.get(String(id))).filter(Boolean);
+  const price = effectiveVariantPrice(item, variant) + options.reduce((sum, option) => sum + optionPrice(option, variant?.name), 0);
+  return { ...line, name: item.name, category_id: item.category_id, stock: item.stock, variant_id: variant?.id || null, variant_name: variant?.name || null, options: options.map(option => ({ ...option, price: optionPrice(option, variant?.name) })), price };
+}
+
 function staffSizeLabel(name) {
   if (name === 'S') return 'Small';
   if (name === 'M') return 'Medium';
@@ -110,7 +169,7 @@ function staffCancellable(order) {
   return order && !['delivered', 'cancelled'].includes(order.status);
 }
 
-function StaffBogoModal({ unlock, items, categories, onClose, onAdd }) {
+function StaffBogoModal({ unlock, items, categories, weekday, onClose, onAdd }) {
   const eligibleItems = useMemo(() => {
     if (!unlock) return [];
     const categoryIds = unlock.offer?.category_ids || [];
@@ -125,6 +184,7 @@ function StaffBogoModal({ unlock, items, categories, onClose, onAdd }) {
   const [categoryId, setCategoryId] = useState('all');
   const [productId, setProductId] = useState('');
   if (!unlock) return null;
+  const requiredFreeSize = staffBogoMappedFreeSize(unlock.offer, unlock.line.variant_name, weekday);
   const visibleItems = eligibleItems.filter(item => categoryId === 'all' || String(item.category_id) === String(categoryId));
   const selectedItem = visibleItems.find(item => String(item.id) === String(productId)) || visibleItems[0] || null;
   const eligibleCategories = categories.filter(category => eligibleItems.some(item => Number(item.category_id) === Number(category.id)));
@@ -133,7 +193,7 @@ function StaffBogoModal({ unlock, items, categories, onClose, onAdd }) {
 
   function addFree(variant) {
     const variantPrice = effectiveVariantPrice(selectedItem, variant);
-    if (!selectedItem || variantPrice > Number(unlock.line.price)) return;
+    if (!selectedItem || variantPrice > Number(unlock.line.price) || (requiredFreeSize !== '' && variant.name !== requiredFreeSize)) return;
     onAdd({
       ...selectedItem,
       key: `bogo:${unlock.line.key}:${selectedItem.id}:${variant.id}`,
@@ -170,7 +230,7 @@ function StaffBogoModal({ unlock, items, categories, onClose, onAdd }) {
         </div>
         {selectedItem ? <div className="bogo-size-grid">{(selectedItem.variants || []).filter(variant => ['S', 'M', 'L'].includes(variant.name)).map(variant => {
           const variantPrice = effectiveVariantPrice(selectedItem, variant);
-          const disabled = variantPrice > Number(unlock.line.price);
+          const disabled = variantPrice > Number(unlock.line.price) || (requiredFreeSize !== '' && variant.name !== requiredFreeSize);
           return <button key={variant.id} className={disabled ? 'bogo-size-option disabled' : 'bogo-size-option'} disabled={disabled} onClick={() => addFree(variant)}><strong>{staffSizeLabel(variant.name)}</strong><span>{inr(variantPrice)} {disabled ? '' : 'FREE'}</span><small>{disabled ? 'Not eligible: higher than paid pizza' : 'Eligible free size'}</small></button>;
         })}</div> : <p className="notice warning">No eligible pizzas configured.</p>}
       </div>
@@ -198,7 +258,7 @@ export default function StaffPage() {
   const [highlightedProductId, setHighlightedProductId] = useState(null);
   const [mobileCategoryOpen, setMobileCategoryOpen] = useState(false);
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
-  const [orderType, setOrderType] = useState('dine_in');
+  const [orderType, setOrderType] = useState('takeaway');
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [discountOpen, setDiscountOpen] = useState(false);
   const [discountType, setDiscountType] = useState('none');
@@ -209,14 +269,25 @@ export default function StaffPage() {
   const [onlineReceived, setOnlineReceived] = useState('');
   const [tableNumber, setTableNumber] = useState('');
   const [customer, setCustomer] = useState({ name: '', phone: '', email: '' });
+  const [delivery, setDelivery] = useState({ address: '', latitude: '', longitude: '', distance_km: '' });
+  const [deliveryQuote, setDeliveryQuote] = useState(null);
+  const [deliveryQuoteLoading, setDeliveryQuoteLoading] = useState(false);
   const [customerLookup, setCustomerLookup] = useState(null);
   const [customerLookupLoading, setCustomerLookupLoading] = useState(false);
   const [customerHistoryOpen, setCustomerHistoryOpen] = useState(false);
   const [message, setMessage] = useState('');
   const [createdOrder, setCreatedOrder] = useState(null);
   const [editingOrder, setEditingOrder] = useState(null);
+  const [editingOrderId, setEditingOrderId] = useState(null);
+  const [lastOrderAction, setLastOrderAction] = useState('created');
+  const submittingRef = useRef(false);
+  const idempotencyKeyRef = useRef('');
   const [posEnabled, setPosEnabled] = useState(true);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setDeliveryQuote(null);
+  }, [cart, discountType, fixedDiscount, selectedOfferId]);
 
   const loadStaffDashboard = useCallback(async () => {
     if (!token('staff')) return;
@@ -350,16 +421,48 @@ export default function StaffPage() {
   const bogoUnlocks = useMemo(() => cart
     .filter(line => !line.is_bogo_free)
     .map(line => ({ line, offer: offerForLine(line), chosen: cart.filter(row => row.is_bogo_free && row.bogo_parent_key === line.key).reduce((sum, row) => sum + Number(row.quantity), 0) }))
-    .filter(unlock => unlock.offer && unlock.chosen < Number(unlock.line.quantity)), [cart, offerForLine]);
+    .filter(unlock => unlock.offer && unlock.chosen < staffBogoCapacity(unlock.offer, unlock.line.quantity)), [cart, offerForLine]);
+  const staffMenuFingerprintRef = useRef('');
+  const refreshStaffMenu = useCallback(() => {
+    api('/menu').then(menu => {
+      const menuItems = menu.items || menu.products || [];
+      const groups = menu.option_groups || [];
+      const fingerprint = JSON.stringify(menuItems.map(item => [item.id, item.price, item.category_id, item.is_active, (item.variants || []).map(v => [v.id, v.name, v.price, v.is_default, v.is_active])]));
+      const catalogChanged = staffMenuFingerprintRef.current !== '' && staffMenuFingerprintRef.current !== fingerprint;
+      staffMenuFingerprintRef.current = fingerprint;
+      setCategories(menu.categories || []);
+      setItems(menuItems);
+      setOptionGroups(groups);
+      setModalItem(current => {
+        if (!current) return current;
+        return menuItems.find(item => String(item.id) === String(current.id)) || current;
+      });
+      setCart(current => {
+        if (!current.length) return current;
+        const next = reconcileStaffBogoCart(current.map(line => repriceStaffLine(line, menuItems, groups)), offerForLine);
+        return JSON.stringify(current) === JSON.stringify(next) ? current : next;
+      });
+      if (catalogChanged && !editingOrderId) setMessage('Menu updated with the latest saved prices.');
+    }).catch(() => {});
+  }, [offerForLine, editingOrderId]);
   const selectedOffer = offers.find(offer => String(offer.id) === String(selectedOfferId));
   const bogoPreview = useMemo(() => {
     if (discountType !== 'bogo' || !selectedOffer) return { amount: 0, freeQty: 0, label: '' };
+    const scopedBuyProducts = (selectedOffer.product_ids || []).map(Number);
+    const scopedBuyCategories = (selectedOffer.category_ids || []).map(Number);
+    const previewMatchesBuy = (line) => {
+      if (line.is_bogo_free) return false;
+      if (scopedBuyProducts.length) return scopedBuyProducts.includes(Number(line.id));
+      if (scopedBuyCategories.length) return scopedBuyCategories.includes(Number(line.category_id));
+      const legacyBuyId = Number(selectedOffer.buy_product_id || (selectedOffer.scope === 'item' ? selectedOffer.scope_id : 0));
+      return legacyBuyId ? Number(line.id) === legacyBuyId : Number(line.category_id) === Number(selectedOffer.scope_id);
+    };
     const buyId = Number(selectedOffer.buy_product_id || (selectedOffer.scope === 'item' ? selectedOffer.scope_id : 0));
     const freeId = Number(selectedOffer.free_product_id || (selectedOffer.scope === 'item' ? selectedOffer.scope_id : buyId));
     const buyQtyNeeded = Math.max(1, Number(selectedOffer.buy_qty || 1));
     const getQty = Math.max(1, Number(selectedOffer.get_qty || 1));
-    const matchingBuyQty = cart.filter(line => buyId ? Number(line.id) === buyId : Number(line.category_id) === Number(selectedOffer.scope_id)).reduce((sum, line) => sum + Number(line.quantity), 0);
-    const freeLine = cart.find(line => Number(line.id) === freeId);
+    const matchingBuyQty = cart.filter(previewMatchesBuy).reduce((sum, line) => sum + Number(line.quantity), 0);
+    const freeLine = (scopedBuyProducts.length || scopedBuyCategories.length) ? cart.find(previewMatchesBuy) : cart.find(line => Number(line.id) === freeId);
     const freeQty = Math.min(freeLine ? Number(freeLine.quantity) : 0, Math.floor(matchingBuyQty / buyQtyNeeded) * getQty);
     return {
       amount: freeLine ? Math.min(subtotal, Number(freeLine.price) * freeQty) : 0,
@@ -373,7 +476,9 @@ export default function StaffPage() {
       ? Math.min(subtotal, subtotal * Math.min(Math.max(Number(fixedDiscount || 0), 0), 100) / 100)
     : discountType === 'bogo' ? bogoPreview.amount : 0;
   const totalDiscount = manualDiscount + explicitBogoDiscount;
-  const finalTotal = Math.max(subtotal - totalDiscount, 0);
+  const discountedSubtotal = Math.max(subtotal - totalDiscount, 0);
+  const quotedDeliveryCharge = orderType === 'delivery' ? Number(deliveryQuote?.delivery_charge || 0) : 0;
+  const finalTotal = orderType === 'delivery' ? Math.max(discountedSubtotal + quotedDeliveryCharge, 0) : discountedSubtotal;
   const cashAmount = paymentMethod === 'cash' ? finalTotal : paymentMethod === 'split' ? Number(cashReceived || 0) : 0;
   const onlineAmount = paymentMethod === 'online' ? finalTotal : paymentMethod === 'split' ? Number(onlineReceived || 0) : 0;
   const totalReceived = cashAmount + onlineAmount;
@@ -381,11 +486,42 @@ export default function StaffPage() {
   const paidNow = Math.min(totalReceived, finalTotal);
   const remaining = Math.max(finalTotal - totalReceived, 0);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onFocus = () => refreshStaffMenu();
+    const timer = setInterval(() => refreshStaffMenu(), 60000);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refreshStaffMenu]);
+
   function choosePaymentMethod(method) {
     setPaymentMethod(method);
     if (method !== 'split') {
       setCashReceived('');
       setOnlineReceived('');
+    }
+  }
+
+  async function quoteStaffDelivery() {
+    if (orderType !== 'delivery') return;
+    if (!delivery.latitude || !delivery.longitude) {
+      setDeliveryQuote(null);
+      setMessage('Enter delivery latitude and longitude for an exact quote, or enter the distance — the final charge is calculated by the server on save.');
+      return;
+    }
+    setDeliveryQuoteLoading(true);
+    try {
+      const data = await api('/delivery/quote', { method: 'POST', body: JSON.stringify({ latitude: delivery.latitude, longitude: delivery.longitude, order_amount: Math.max(discountedSubtotal, 0), order_type: 'delivery' }) });
+      setDeliveryQuote(data);
+      setMessage(data.is_free_delivery ? 'Free delivery applies for this order.' : `Delivery charge ${inr(data.delivery_charge)} for ${data.distance_km} km. Final charge is confirmed by the server on save.`);
+    } catch (err) {
+      setDeliveryQuote(null);
+      setMessage(err.message);
+    } finally {
+      setDeliveryQuoteLoading(false);
     }
   }
 
@@ -407,15 +543,24 @@ export default function StaffPage() {
   function addLine(line) {
     setCart(current => {
       const existing = current.find(row => row.key === line.key);
-      if (existing) return current.map(row => row.key === line.key ? { ...row, quantity: Math.min(Number(row.stock), Number(row.quantity) + Number(line.quantity)) } : row);
-      return [...current, line];
+      const merged = existing ? current.map(row => row.key === line.key ? { ...row, quantity: Math.min(Number(row.stock), Number(row.quantity) + Number(line.quantity)) } : row) : [...current, line];
+      const reconciled = reconcileStaffBogoCart(merged, offerForLine);
+      return reconciled;
     });
     setModalItem(null);
     setBogoPicker(null);
   }
 
   function qty(key, delta) {
-    setCart(current => current.map(line => (line.key || line.id) === key ? { ...line, quantity: Number(line.quantity) + delta } : line).filter(line => line.quantity > 0));
+    setCart(current => {
+      const target = current.find(line => (line.key || line.id) === key);
+      if (!target) return current;
+      const targetKey = String(target.key || target.id);
+      const next = !target.is_bogo_free && Number(target.quantity) + delta <= 0
+        ? current.filter(line => line.is_bogo_free ? String(line.bogo_parent_key || '') !== targetKey : String(line.key || line.id) !== key)
+        : current.map(line => (line.key || line.id) === key ? { ...line, quantity: Number(line.quantity) + delta } : line).filter(line => line.quantity > 0);
+      return reconcileStaffBogoCart(next, offerForLine);
+    });
   }
 
   function add(item) {
@@ -431,7 +576,11 @@ export default function StaffPage() {
   function resetOrderForm() {
     setCart([]);
     setEditingOrder(null);
-    setOrderType('dine_in');
+    setEditingOrderId(null);
+    idempotencyKeyRef.current = '';
+    setOrderType('takeaway');
+    setDelivery({ address: '', latitude: '', longitude: '', distance_km: '' });
+    setDeliveryQuote(null);
     setPaymentMethod('cash');
     setDiscountOpen(false);
     setDiscountType('none');
@@ -472,31 +621,77 @@ export default function StaffPage() {
     if (!permissions.edit_orders) return setMessage('You do not have permission to edit orders.');
     try {
       setMessage('');
+      if (['out_for_delivery', 'delivered', 'cancelled'].includes(order.status)) throw new Error(`Order ${order.order_number} can no longer be edited (status: ${String(order.status).replaceAll('_', ' ')}).`);
       const data = await api(`/staff/orders/${order.id}/edit`);
+      if (data && data.can_edit === false) throw new Error(`Order ${data.order?.order_number || order.order_number} can no longer be edited.`);
+      if (!data || !data.order || !data.order.id) throw new Error('Could not load order details. Please try again.');
       setEditingOrder(data.order);
+      setEditingOrderId(Number(data.order.id));
       setCreatedOrder(null);
-      setCart((data.items || []).map(cartLineFromOrderItem));
+      const mappedLines = (data.items || []).map(cartLineFromOrderItem);
+      const editPaidLines = mappedLines.filter(line => !line.is_bogo_free);
+      const editUsedFree = new Map();
+      setCart(mappedLines.map(line => {
+        if (!line.is_bogo_free) return line;
+        if (editPaidLines.some(paid => paid.key === line.bogo_parent_key)) return line;
+        const fallback = editPaidLines.find(paid => {
+          if (Number(line.price) > Number(paid.price)) return false;
+          const offer = offerForLine(paid);
+          if (!offer) return false;
+          return (editUsedFree.get(paid.key) || 0) + Number(line.quantity) <= staffBogoCapacity(offer, paid.quantity);
+        });
+        if (!fallback) return line;
+        editUsedFree.set(fallback.key, (editUsedFree.get(fallback.key) || 0) + Number(line.quantity));
+        return { ...line, bogo_parent_key: fallback.key };
+      }));
       setCustomer({ name: data.order.customer_name || '', phone: data.order.customer_phone || '', email: data.order.customer_email || '' });
-      setOrderType(data.order.order_type === 'takeaway' ? 'takeaway' : 'dine_in');
+      setOrderType(['takeaway', 'delivery', 'dine_in'].includes(data.order.order_type) ? data.order.order_type : 'takeaway');
+      setDelivery({ address: data.order.delivery_address || '', latitude: data.order.latitude || '', longitude: data.order.longitude || '', distance_km: data.order.distance_km || '' });
+      setDeliveryQuote(null);
       setPaymentMethod(['cash', 'online', 'split'].includes(data.order.payment_method) ? data.order.payment_method : 'cash');
       setCashReceived(data.order.cash_received || '');
       setOnlineReceived(data.order.online_received || '');
       setTableNumber(data.order.table_number || '');
-      setDiscountOpen(false);
-      setDiscountType('none');
+      const savedDiscountType = data.order?.staff_discount_type || 'none';
+      setDiscountOpen(savedDiscountType !== 'none');
+      setDiscountType(['fixed', 'percent', 'bogo'].includes(savedDiscountType) ? savedDiscountType : 'none');
+      setFixedDiscount(savedDiscountType === 'fixed' || savedDiscountType === 'percent' ? String(data.order?.staff_discount_value ?? '') : '');
+      setDiscountReason(savedDiscountType === 'fixed' || savedDiscountType === 'percent' ? String(data.order?.staff_discount_description ?? '') : '');
+      setSelectedOfferId(savedDiscountType === 'bogo' ? String(data.order?.staff_offer_id ?? '') : '');
+      // Discount panel prefilled from the saved order above so the permitted discount survives edits.
+      // setDiscountType prefilled above; do not reset the saved discount here.
       setMessage(`Editing ${data.order.order_number}. Add, remove, or adjust items, then save changes.`);
     } catch (err) {
       setMessage(err.message);
     }
   }
 
+  function submitOrderForm() {
+    if (loading || submittingRef.current) return;
+    submittingRef.current = true;
+    const done = () => { submittingRef.current = false; };
+    (editingOrderId ? saveEditedOrder() : createOrder()).finally(done);
+  }
+
   async function saveEditedOrder() {
-    if (!editingOrder) return;
+    if (!editingOrderId || !editingOrder) return setMessage('No order is being edited. Your changes were not saved.');
     if (!permissions.edit_orders) return setMessage('You do not have permission to edit orders.');
     if (!cart.length) return setMessage('Edited order must contain at least one item.');
+    if (customer.email.trim() !== '' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer.email.trim())) return setMessage('Enter a valid customer email address or leave it empty.');
+    if (orderType === 'delivery') {
+      if (!delivery.address.trim()) return setMessage('Delivery address is required.');
+      if ((!delivery.latitude || !delivery.longitude) && !delivery.distance_km) return setMessage('Enter delivery coordinates or the delivery distance.');
+    }
+    if (['fixed', 'percent', 'bogo'].includes(discountType) && !permissions.apply_manual_discount) return setMessage('You do not have permission to apply discounts.');
     setLoading(true);
     try {
       const payload = {
+        customer_name: customer.name,
+        customer_phone: customer.phone,
+        customer_email: customer.email,
+        order_type: orderType,
+        table_number: orderType === 'dine_in' ? tableNumber : undefined,
+        ...(orderType === 'delivery' ? { delivery_address: delivery.address, latitude: delivery.latitude, longitude: delivery.longitude, distance_km: delivery.distance_km } : {}),
         payment_method: paymentMethod,
         cash_received: paymentMethod === 'split' ? cashReceived : undefined,
         online_received: paymentMethod === 'split' ? onlineReceived : undefined,
@@ -510,14 +705,20 @@ export default function StaffPage() {
           bogo_parent_key: line.bogo_parent_key || ''
         }))
       };
-      const data = await api(`/staff/orders/${editingOrder.id}/edit`, { method: 'PUT', body: JSON.stringify(payload) });
+      payload.discount_type = discountType;
+      payload.discount_amount = ['fixed', 'percent'].includes(discountType) ? fixedDiscount : undefined;
+      payload.discount_reason = ['fixed', 'percent'].includes(discountType) ? discountReason : undefined;
+      payload.offer_id = discountType === 'bogo' ? selectedOfferId : undefined;
+      payload.order_id = editingOrderId;
+      const data = await api(`/staff/orders/${editingOrderId}/edit`, { method: 'PUT', body: JSON.stringify(payload) });
+      setLastOrderAction('updated');
       setCreatedOrder(data.order);
       setStaffDashboard(current => ({
         ...current,
-        current_orders: (current.current_orders || []).filter(row => Number(row.id) !== Number(editingOrder.id))
+        current_orders: (current.current_orders || []).map(row => Number(row.id) === Number(editingOrderId) ? { ...row, ...data.order } : row)
       }));
       resetOrderForm();
-      setMessage('Order updated and totals recalculated.');
+      setMessage(`Order ${data.order.order_number} updated successfully. Total ${inr(data.order.total_amount)} · Paid ${inr(data.order.paid_amount || 0)} · Remaining ${inr(data.order.remaining_amount || 0)}.`);
       loadStaffDashboard();
     } catch (err) {
       setMessage(err.message);
@@ -545,7 +746,13 @@ export default function StaffPage() {
 
   async function createOrder() {
     if (!permissions.create_orders) return setMessage('You do not have permission to create orders.');
+    if (editingOrderId) return setMessage(`You are editing Order ${editingOrder?.order_number || `#${editingOrderId}`}. Save or cancel the edit before creating a new order.`);
     if (!cart.length) return setMessage('Cart is empty.');
+    if (customer.email.trim() !== '' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer.email.trim())) return setMessage('Enter a valid customer email address or leave it empty.');
+    if (orderType === 'delivery') {
+      if (!delivery.address.trim()) return setMessage('Delivery address is required.');
+      if ((!delivery.latitude || !delivery.longitude) && !delivery.distance_km) return setMessage('Enter delivery coordinates or the delivery distance.');
+    }
     if (cashAmount < 0 || onlineAmount < 0 || Number.isNaN(cashAmount) || Number.isNaN(onlineAmount)) return setMessage('Enter valid payment amounts.');
     if (discountType === 'fixed' && Number(fixedDiscount || 0) > subtotal) return setMessage('Discount cannot exceed subtotal.');
     if (discountType === 'percent' && (Number(fixedDiscount || 0) < 0 || Number(fixedDiscount || 0) > 100)) return setMessage('Percentage discount must be between 0 and 100.');
@@ -554,9 +761,11 @@ export default function StaffPage() {
     setLoading(true);
     setMessage('');
     try {
-      const idempotency = crypto.randomUUID();
+      if (!idempotencyKeyRef.current) idempotencyKeyRef.current = crypto.randomUUID();
+      const idempotency = idempotencyKeyRef.current;
       const body = {
         order_type: orderType,
+        ...(orderType === 'delivery' ? { delivery_address: delivery.address, latitude: delivery.latitude, longitude: delivery.longitude, distance_km: delivery.distance_km } : {}),
         payment_method: paymentMethod,
         items: cart.map(line => ({ id: line.id, variant_id: line.variant_id, option_ids: line.option_ids || [], quantity: line.quantity, client_key: line.key || '', is_bogo_free: Boolean(line.is_bogo_free), bogo_parent_key: line.bogo_parent_key || '' })),
         cash_received: paymentMethod === 'split' ? cashReceived : undefined,
@@ -572,6 +781,8 @@ export default function StaffPage() {
         idempotency_key: idempotency
       };
       const data = await api('/staff/orders', { method: 'POST', headers: { 'X-Idempotency-Key': idempotency }, body: JSON.stringify(body) });
+      setLastOrderAction('created');
+      if (data.duplicate) setMessage(`Order ${data.order.order_number} was already created. Retry detected — no duplicate order was made.`);
       setCreatedOrder(data.order);
       resetOrderForm();
       loadStaffDashboard();
@@ -644,10 +855,30 @@ export default function StaffPage() {
       </div>
 
       <div className="staff-segmented">
+        <button className={orderType === 'takeaway' ? 'active' : ''} onClick={() => setOrderType('takeaway')}>Takeaway</button>
+        <button className={orderType === 'delivery' ? 'active' : ''} onClick={() => setOrderType('delivery')}>Delivery</button>
         <button className={orderType === 'dine_in' ? 'active' : ''} onClick={() => setOrderType('dine_in')}>Dine-In</button>
+      </div>
+      {/* Superseded duplicate takeaway buttons, kept out of render:
+        <button className={orderType === 'takeaway' ? 'active' : ''} onClick={() => setOrderType('takeaway')}>Takeaway</button>
         <button className={orderType === 'takeaway' ? 'active' : ''} onClick={() => setOrderType('takeaway')}>Takeaway</button>
       </div>
+      */}
       {orderType === 'dine_in' ? <input className="staff-input" placeholder="Table number / seat optional" value={tableNumber} onChange={e => setTableNumber(e.target.value)} /> : null}
+      {orderType === 'delivery' ? (
+        <div className="staff-customer-grid">
+          <textarea className="staff-input staff-textarea" placeholder="Delivery address" aria-label="Delivery address" value={delivery.address} onChange={e => { setDelivery({ ...delivery, address: e.target.value }); setDeliveryQuote(null); }} />
+          <div className="staff-customer-grid two-col">
+            <input className="staff-input" placeholder="Latitude" inputMode="decimal" value={delivery.latitude} onChange={e => { setDelivery({ ...delivery, latitude: e.target.value }); setDeliveryQuote(null); }} />
+            <input className="staff-input" placeholder="Longitude" inputMode="decimal" value={delivery.longitude} onChange={e => { setDelivery({ ...delivery, longitude: e.target.value }); setDeliveryQuote(null); }} />
+          </div>
+          <input className="staff-input" placeholder="Distance (km) — if coordinates unknown" inputMode="decimal" value={delivery.distance_km} onChange={e => { setDelivery({ ...delivery, distance_km: e.target.value }); setDeliveryQuote(null); }} />
+          <div className="action-row">
+            <button className="ghost" onClick={quoteStaffDelivery} disabled={deliveryQuoteLoading || !cart.length}>{deliveryQuoteLoading ? 'Calculating...' : 'Calculate Delivery'}</button>
+          </div>
+          {deliveryQuote ? <p className="small-note">{deliveryQuote.is_free_delivery ? `FREE DELIVERY · ${deliveryQuote.distance_km} km · ${deliveryQuote.message || ''}` : `Delivery ${inr(deliveryQuote.delivery_charge)} · ${deliveryQuote.distance_km} km`}</p> : <p className="small-note">Enter coordinates and tap Calculate Delivery for an exact quote, or enter the distance — the server confirms the final charge on save.</p>}
+        </div>
+      ) : null}
 
       <div className="staff-customer-grid">
         <input className="staff-input" placeholder="Customer name optional" value={customer.name} onChange={e => setCustomer({ ...customer, name: e.target.value })} />
@@ -712,7 +943,7 @@ export default function StaffPage() {
               <>
                 <select className="staff-input" value={selectedOfferId} onChange={e => setSelectedOfferId(e.target.value)}>
                   <option value="">Select active offer</option>
-                  {offers.filter(offer => (offer.offer_type || 'bogo') === 'bogo').map(offer => <option key={offer.id} value={offer.id}>{offer.name}</option>)}
+                  {offers.filter(offer => (offer.offer_type || 'bogo') === 'bogo' && offer.schedule_active !== false && offer.schedule_active !== 0).map(offer => <option key={offer.id} value={offer.id}>{offer.name}</option>)}
                 </select>
                 <p className={bogoPreview.freeQty > 0 ? 'small-note success-text' : 'small-note'}>{selectedOfferId ? `${bogoPreview.label} · Discount ${inr(bogoPreview.amount)}` : 'Choose an active BOGO offer.'}</p>
               </>
@@ -741,9 +972,9 @@ export default function StaffPage() {
         ) : null}
         {paymentMethod === 'split' ? (
           <>
-            <input className="staff-input" type="number" min="0" step="0.01" placeholder="Cash received" value={cashReceived} onChange={e => setCashReceived(e.target.value)} />
-            <input className="staff-input" type="number" min="0" step="0.01" placeholder="Online received" value={onlineReceived} onChange={e => setOnlineReceived(e.target.value)} />
-            <p className="small-note">Only split payment uses manual amounts. Counter online means UPI/card/bank app collected at the counter.</p>
+            <input className="staff-input" type="number" min="0" step="0.01" placeholder="Cash received" value={cashReceived} disabled={editingOrderId != null} onChange={e => setCashReceived(e.target.value)} />
+            <input className="staff-input" type="number" min="0" step="0.01" placeholder="Online received" value={onlineReceived} disabled={editingOrderId != null} onChange={e => setOnlineReceived(e.target.value)} />
+            <p className="small-note">Only split payment uses manual amounts. Counter online means UPI/card/bank app collected at the counter.{editingOrderId != null ? ' Recorded received amounts stay unchanged while editing; only the remaining balance is recomputed.' : ''}</p>
           </>
         ) : null}
       </div>
@@ -753,14 +984,24 @@ export default function StaffPage() {
           <div><span>Subtotal</span><strong>{inr(subtotal)}</strong></div>
           {explicitBogoDiscount > 0 ? <div><span>BOGO Discount</span><strong>-{inr(explicitBogoDiscount)}</strong></div> : null}
           <div><span>Discount</span><strong>{manualDiscount > 0 ? `-${inr(manualDiscount)}` : inr(0)}</strong></div>
-          <div className="grand"><span>Final Total</span><strong>{inr(finalTotal)}</strong></div>
+          {orderType === 'delivery' ? <div><span>Delivery Charge</span><strong>{deliveryQuote ? inr(quotedDeliveryCharge) : 'On save'}</strong></div> : null}
+          <div className="grand"><span>Grand Total</span><strong>{inr(finalTotal)}</strong></div>
           <div><span>Total Received</span><strong>{inr(totalReceived)}</strong></div>
           <div><span>Paid</span><strong>{inr(paidNow)}</strong></div>
           <div><span>Remaining</span><strong>{inr(remaining)}</strong></div>
           <div><span>Change</span><strong>{inr(change)}</strong></div>
         </div>
       ) : null}
-      <button className="full-width staff-place-order" onClick={editingOrder ? saveEditedOrder : createOrder} disabled={loading || !cart.length || (!editingOrder && !permissions.create_orders) || (editingOrder && !permissions.edit_orders)}>{editingOrder ? <Save size={18} /> : <CreditCard size={18} />} {loading ? (editingOrder ? 'Saving...' : 'Creating...') : editingOrder ? (permissions.edit_orders ? 'Save Edited Order' : 'Edit Disabled') : permissions.create_orders ? 'Place Order' : 'Create Order Disabled'}</button>
+      {orderType === 'delivery' && paymentMethod !== 'split' ? (
+        <div className="payment-breakdown staff-payment-breakdown">
+          <div><span>Subtotal</span><strong>{inr(subtotal)}</strong></div>
+          {explicitBogoDiscount > 0 ? <div><span>BOGO Discount</span><strong>-{inr(explicitBogoDiscount)}</strong></div> : null}
+          <div><span>Discount</span><strong>{manualDiscount > 0 ? `-${inr(manualDiscount)}` : inr(0)}</strong></div>
+          <div><span>Delivery Charge</span><strong>{deliveryQuote ? inr(quotedDeliveryCharge) : 'On save'}</strong></div>
+          <div className="grand"><span>Grand Total</span><strong>{inr(finalTotal)}</strong></div>
+        </div>
+      ) : null}
+      <button className="full-width staff-place-order" onClick={submitOrderForm} disabled={loading || !cart.length || (!editingOrderId && !permissions.create_orders) || (editingOrderId && !permissions.edit_orders)}>{editingOrderId ? <Save size={18} /> : <CreditCard size={18} />} {loading ? (editingOrderId ? 'Saving...' : 'Creating...') : editingOrderId ? (permissions.edit_orders ? 'Save Edited Order' : 'Edit Disabled') : permissions.create_orders ? 'Place Order' : 'Create Order Disabled'}</button>
     </aside>
   );
 
@@ -797,12 +1038,12 @@ export default function StaffPage() {
         <div><strong>The Pizza House POS</strong><span>{new Date().toLocaleString()}</span></div>
         <div className="staff-header-status">
           <span className="badge success">{staff.name}</span>
-          <span className="badge warning">{orderType === 'dine_in' ? 'DINE-IN' : 'TAKEAWAY'}</span>
+          <span className="badge warning">{orderType === 'dine_in' ? 'DINE-IN' : orderType === 'delivery' ? 'DELIVERY' : 'TAKEAWAY'}</span>
           <button className="ghost" onClick={() => { clearToken('staff'); setStaff(null); }}><LogOut size={16} /> Logout</button>
         </div>
       </header>
       {message ? <p className="notice error" role="alert" aria-live="polite">{message}</p> : null}
-      {createdOrder ? <section className="staff-success-card"><h2>Order Created Successfully</h2><p><strong>{createdOrder.order_number}</strong></p><p>Subtotal: {inr(createdOrder.subtotal)} · Discount: {inr(createdOrder.discount_amount || 0)} · Total: {inr(createdOrder.total_amount)}</p>{createdOrder.discount_description ? <p>{createdOrder.discount_description}</p> : null}<p>Payment: {createdOrder.payment_method || createdOrder.payment_mode} · {createdOrder.payment_status}</p><p>Cash: {inr(createdOrder.cash_received || 0)} · Online: {inr(createdOrder.online_received || 0)} · Paid: {inr(createdOrder.paid_amount || 0)} · Remaining: {inr(createdOrder.remaining_amount || 0)} · Change: {inr(createdOrder.change_amount || createdOrder.cash_change || 0)}</p><div className="action-row"><button className="ghost" onClick={() => openInvoice(`/staff/orders/${createdOrder.id}/invoice`)}><Printer size={16} /> Generate / Download Bill</button><button onClick={() => { setCreatedOrder(null); resetOrderForm(); }}>New Order</button></div></section> : null}
+      {createdOrder ? <section className="staff-success-card"><h2>{lastOrderAction === 'updated' ? 'Order Updated Successfully' : 'Order Created Successfully'}</h2><p><strong>{createdOrder.order_number}</strong></p><p>Subtotal: {inr(createdOrder.subtotal)} · Discount: {inr(createdOrder.discount_amount || 0)}{createdOrder.order_type === 'delivery' ? ` · Delivery: ${inr(createdOrder.delivery_charge || 0)}` : ''} · Total: {inr(createdOrder.total_amount)}</p>{createdOrder.discount_description ? <p>{createdOrder.discount_description}</p> : null}{createdOrder.order_type === 'delivery' && createdOrder.delivery_address ? <p>Deliver to: {createdOrder.delivery_address}</p> : null}<p>Payment: {createdOrder.payment_method || createdOrder.payment_mode} · {createdOrder.payment_status}</p><p>Cash: {inr(createdOrder.cash_received || 0)} · Online: {inr(createdOrder.online_received || 0)} · Paid: {inr(createdOrder.paid_amount || 0)} · Remaining: {inr(createdOrder.remaining_amount || 0)} · Change: {inr(createdOrder.change_amount || createdOrder.cash_change || 0)}</p><div className="action-row"><button className="ghost" onClick={() => openInvoice(`/staff/orders/${createdOrder.id}/invoice`)}><Printer size={16} /> Generate / Download Bill</button><button onClick={() => { setCreatedOrder(null); resetOrderForm(); }}>New Order</button></div></section> : null}
       <section className="staff-dashboard-strip">
         {permissions.view_today_orders ? <article className="staff-today-card"><span>Today</span><strong>{staffDashboard.today?.orders || 0}</strong><small>Orders</small></article> : null}
         {permissions.view_current_orders ? (
@@ -814,9 +1055,9 @@ export default function StaffPage() {
                 return (
                   <div className="staff-current-order-card" key={order.id}>
                     <div><strong>{order.order_number}</strong><span>{order.customer_name || 'Walk-in customer'} {order.customer_phone ? `· ${order.customer_phone}` : ''}</span></div>
-                    <div><span>{order.order_type === 'dine_in' ? 'Dine-in' : 'Takeaway'} · Staff</span><strong>{inr(order.total_amount)}</strong></div>
+                    <div><span>{order.order_type === 'dine_in' ? 'Dine-in' : order.order_type === 'delivery' ? 'Delivery' : 'Takeaway'} · Staff</span><strong>{inr(order.total_amount)}</strong>{order.order_type === 'delivery' && order.delivery_address ? <small>{order.delivery_address}</small> : null}</div>
                     <div><span>{order.payment_status}</span><small>Paid {inr(order.paid_amount || 0)} · Remaining {inr(order.remaining_amount || 0)}</small></div>
-                    <div><span>Status</span><strong>{order.status === 'received' ? 'Created' : order.status === 'delivered' ? 'Completed' : order.status.replaceAll('_', ' ')}</strong></div>
+                    <div><span>Status</span><strong>{order.status === 'received' ? 'Created' : order.status === 'accepted' ? 'Confirmed' : order.status === 'delivered' ? 'Completed' : order.status.replaceAll('_', ' ')}</strong></div>
                     <div className="action-row">
                       {next.includes('accepted') && permissions.confirm_orders ? <button className="ghost" onClick={() => updateStaffOrder(order, 'accepted')}>{staffOrderActionLabel('accepted')}</button> : null}
                       {next.includes('ready') && permissions.mark_order_ready_complete ? <button className="ghost" onClick={() => updateStaffOrder(order, 'ready')}>{staffOrderActionLabel('ready')}</button> : null}
@@ -833,7 +1074,7 @@ export default function StaffPage() {
           </article>
         ) : null}
       </section>
-      {editingOrder ? <section className="staff-success-card staff-editing-banner"><h2>Editing {editingOrder.order_number}</h2><p>Update products, quantities, sizes, or add-ons in the cart. The backend will recalculate totals, stock, coupons, BOGO, and remaining amount when you save.</p><div className="action-row"><button className="ghost" onClick={resetOrderForm}>Cancel Edit</button></div></section> : null}
+      {editingOrderId && editingOrder ? <section className="staff-success-card staff-editing-banner"><h2>Editing {editingOrder.order_number}</h2><p>Update products, customer details, order type, delivery address, or payment method. The backend will recalculate totals, stock, coupons, BOGO, delivery charge, and remaining amount when you save. Verified payments stay unchanged; only the remaining balance is recomputed. To change a burger option or pizza size, remove the line and re-add it with the new option.</p><div className="action-row"><button className="ghost" onClick={resetOrderForm}>Cancel Edit</button></div></section> : null}
       <section className="staff-pos-layout">
         <aside className="staff-category-panel">
           <h2>Categories</h2>
@@ -863,8 +1104,8 @@ export default function StaffPage() {
       </button>
       {mobileCategoryOpen ? <div className="staff-mobile-drawer-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setMobileCategoryOpen(false); }}><aside className="staff-mobile-category-drawer"><div className="staff-drawer-head"><h2>Categories</h2><button className="icon-button" onClick={() => setMobileCategoryOpen(false)}><X size={18} /></button></div>{categoryButtons}</aside></div> : null}
       {mobileCartOpen ? <div className="staff-mobile-drawer-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setMobileCartOpen(false); }}><section className="staff-mobile-cart-sheet"><div className="staff-drawer-head"><h2>Checkout</h2><button className="icon-button" onClick={() => setMobileCartOpen(false)}><X size={18} /></button></div>{cartPanel}</section></div> : null}
-      <StaffOptionModal item={modalItem} optionGroups={optionGroups} onClose={() => setModalItem(null)} onAdd={addLine} />
-      <StaffBogoModal unlock={bogoPicker} items={items} categories={categories} onClose={() => setBogoPicker(null)} onAdd={addLine} />
+      <StaffOptionModal key={modalItem ? `staff-product-${modalItem.id}` : 'staff-product-none'} item={modalItem} optionGroups={optionGroups} onClose={() => setModalItem(null)} onAdd={addLine} />
+      <StaffBogoModal key={bogoPicker ? `staff-bogo-${bogoPicker.line?.key}-${bogoPicker.offer?.id}` : 'staff-bogo-none'} unlock={bogoPicker} items={items} categories={categories} weekday={activeBogoWeekday} onClose={() => setBogoPicker(null)} onAdd={addLine} />
     </main>
   );
 }

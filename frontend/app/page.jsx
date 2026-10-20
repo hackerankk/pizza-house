@@ -52,6 +52,41 @@ function ensureFreeBogoGroup(line = {}, parentGroupId) {
   return { ...line, bogoGroupId: groupId, bogo_group_id: groupId, bogoRole: 'free', bogo_role: 'free', bogo_parent_key: groupId };
 }
 
+function bogoSizeCode(name = '') {
+  if (name === 'S' || String(name).toLowerCase().includes('small')) return 'S';
+  if (name === 'M' || String(name).toLowerCase().includes('medium')) return 'M';
+  if (name === 'L' || String(name).toLowerCase().includes('large')) return 'L';
+  return String(name || '').toUpperCase();
+}
+
+function bogoCapacity(offer, paidQty) {
+  const buy = Math.max(1, Number(offer?.buy_qty || 1));
+  const get = Math.max(1, Number(offer?.get_qty || 1));
+  return Math.floor(Math.max(Number(paidQty || 0), 0) / buy) * get;
+}
+
+function matchBogoOfferForLine(line, offers, weekday) {
+  if (!line || line.is_bogo_free || !['S', 'M', 'L'].includes(bogoSizeCode(line.variant_name))) return null;
+  return (offers || []).find(offer => {
+    const productIds = (offer.product_ids || []).map(Number);
+    const categoryIds = (offer.category_ids || []).map(Number);
+    const scoped = productIds.length ? productIds.includes(Number(line.id)) : (categoryIds.length ? categoryIds.includes(Number(line.category_id)) : true);
+    if (!scoped) return false;
+    const sizeRules = offer.size_rules || {};
+    const rules = (weekday && sizeRules[weekday]) || sizeRules.default || sizeRules;
+    const size = bogoSizeCode(line.variant_name);
+    return !rules || !Object.keys(rules).length || (Object.prototype.hasOwnProperty.call(rules, size) && String(rules[size] || '').trim() !== '');
+  }) || null;
+}
+
+function bogoMappedFreeSize(offer, paidVariantName, weekday) {
+  const rules = offer?.size_rules || {};
+  const dayRules = (weekday && rules[weekday]) || rules.default || rules;
+  if (!dayRules || !Object.keys(dayRules).length) return '';
+  const mapped = dayRules[bogoSizeCode(paidVariantName)];
+  return mapped ? bogoSizeCode(mapped) : '';
+}
+
 function reconcileBogoCart(lines = [], offerForLine = null) {
   const normalized = lines.map(line => line.is_bogo_free ? { ...line } : ensurePaidBogoGroup(line));
   const paidByGroup = new Map();
@@ -84,7 +119,9 @@ function reconcileBogoCart(lines = [], offerForLine = null) {
     }
 
     const alreadyUsed = usedFreeQty.get(groupId) || 0;
-    const remaining = Math.max(Number(paidLine.quantity || 0) - alreadyUsed, 0);
+    const capacityOffer = offerForLine ? offerForLine(paidLine) : null;
+    const capacity = capacityOffer ? bogoCapacity(capacityOffer, Number(paidLine.quantity || 0)) : Number(paidLine.quantity || 0);
+    const remaining = Math.max(capacity - alreadyUsed, 0);
     if (remaining <= 0) return;
 
     const quantity = Math.min(Number(line.quantity || 1), remaining);
@@ -93,6 +130,23 @@ function reconcileBogoCart(lines = [], offerForLine = null) {
   });
 
   return reconciled;
+}
+
+function cartOptionPrice(option, variantName) {
+  if (variantName === 'S') return Number(option.small_price || option.fixed_price || 0);
+  if (variantName === 'M') return Number(option.medium_price || option.fixed_price || 0);
+  if (variantName === 'L') return Number(option.large_price || option.fixed_price || 0);
+  return Number(option.fixed_price || option.small_price || 0);
+}
+
+function repriceCartLine(line, freshItems, freshGroups) {
+  const item = (freshItems || []).find(row => String(row.id) === String(line.id));
+  if (!item) return line;
+  const variant = (item.variants || []).find(v => String(v.id) === String(line.variant_id)) || (item.variants || []).find(v => Number(v.is_default) === 1) || (item.variants || [])[0] || null;
+  const optionsById = new Map((freshGroups || []).flatMap(group => (group.options || []).map(option => [String(option.id), { ...option, group_name: group.name }])));
+  const options = (line.option_ids || []).map(id => optionsById.get(String(id))).filter(Boolean);
+  const price = effectiveVariantPrice(item, variant) + options.reduce((sum, option) => sum + cartOptionPrice(option, variant?.name), 0);
+  return { ...line, name: item.name, category_id: item.category_id, stock: item.stock, variant_id: variant?.id || null, variant_name: variant?.name || null, options: options.map(option => ({ ...option, price: cartOptionPrice(option, variant?.name) })), price };
 }
 
 function sameCart(a, b) {
@@ -254,10 +308,10 @@ function CartPanel({ cart, subtotal, couponCode, onCoupon, onQty, onChooseFree, 
         <input className="lg:!min-h-9 lg:!py-1" placeholder="Coupon code" value={couponCode} onChange={e => onCoupon(e.target.value)} />
         <div className="totals compact lg:!grid lg:!grid-cols-2 lg:!gap-1">
           <div className="lg:!grid lg:!gap-0 lg:!py-0.5 lg:!text-[11px]"><span>Subtotal</span><strong>{inr(subtotal)}</strong></div>
-          {bogoDiscount > 0 ? <div className="lg:!grid lg:!gap-0 lg:!py-0.5 lg:!text-[11px]"><span>BOGO Discount</span><strong>-{inr(bogoDiscount)}</strong></div> : null}
+          {bogoDiscount > 0 ? <div className="lg:!grid lg:!gap-0 lg:!py-0.5 lg:!text-[11px]"><span>BOGO Savings</span><strong>-{inr(bogoDiscount)}</strong></div> : null}
           <div className="lg:!grid lg:!gap-0 lg:!py-0.5 lg:!text-[11px]"><span>Coupon</span><strong>Checkout</strong></div>
           <div className="lg:!grid lg:!gap-0 lg:!py-0.5 lg:!text-[11px]"><span>Delivery</span><strong>Checkout</strong></div>
-          <div className="grand lg:!col-span-2 lg:!p-1.5"><span>Estimated Total</span><strong>{inr(Math.max(subtotal - bogoDiscount, 0))}</strong></div>
+          <div className="grand lg:!col-span-2 lg:!p-1.5"><span>Estimated Total</span><strong>{inr(Math.max(subtotal, 0))}</strong></div>
         </div>
         <Link className={cart.length ? 'button full-width cart-checkout-button lg:!min-h-9 lg:!py-1.5 lg:!text-sm' : 'button full-width disabled-link cart-checkout-button lg:!min-h-9 lg:!py-1.5 lg:!text-sm'} href={cart.length ? '/checkout' : '#menu'}>Checkout <ChevronRight size={18} /></Link>
       </div>
@@ -531,7 +585,7 @@ function effectiveVariantPrice(item, variant = null) {
   return variantPrice > 0 ? variantPrice : productPrice;
 }
 
-function BogoFreePizzaModal({ unlock, items, categories, onClose, onAdd }) {
+function BogoFreePizzaModal({ unlock, items, categories, weekday, onClose, onAdd }) {
   const modalRef = useRef(null);
   const eligibleItems = useMemo(() => {
     if (!unlock) return [];
@@ -586,7 +640,8 @@ function BogoFreePizzaModal({ unlock, items, categories, onClose, onAdd }) {
   const eligibleCategoryNames = eligibleCategories.map(category => category.name).join(', ') || 'Configured eligible pizza categories';
   const eligibleProductNames = eligibleItems.slice(0, 6).map(item => item.name).join(', ');
   const sizeVariants = (selectedItem?.variants || []).filter(variant => ['S', 'M', 'L'].includes(variant.name));
-  const eligibleVariants = sizeVariants.filter(variant => effectiveVariantPrice(selectedItem, variant) <= Number(unlock.line.price));
+  const requiredFreeSize = unlock ? bogoMappedFreeSize(unlock.offer, unlock.line.variant_name, weekday) : '';
+  const eligibleVariants = sizeVariants.filter(variant => effectiveVariantPrice(selectedItem, variant) <= Number(unlock.line.price) && (!requiredFreeSize || variant.name === requiredFreeSize));
   const selectedVariant = sizeVariants.find(variant => String(variant.id) === String(variantId)) || eligibleVariants[0] || null;
 
   function addFree() {
@@ -635,7 +690,7 @@ function BogoFreePizzaModal({ unlock, items, categories, onClose, onAdd }) {
         </div>
         <div className="bogo-product-grid !grid !grid-cols-2 md:!grid-cols-3 xl:!grid-cols-4">
           {visibleItems.map(item => {
-            const cheapestEligible = (item.variants || []).filter(variant => ['S', 'M', 'L'].includes(variant.name) && effectiveVariantPrice(item, variant) <= Number(unlock.line.price)).sort((a, b) => effectiveVariantPrice(item, a) - effectiveVariantPrice(item, b))[0];
+            const cheapestEligible = (item.variants || []).filter(variant => ['S', 'M', 'L'].includes(variant.name) && effectiveVariantPrice(item, variant) <= Number(unlock.line.price) && (!requiredFreeSize || variant.name === requiredFreeSize)).sort((a, b) => effectiveVariantPrice(item, a) - effectiveVariantPrice(item, b))[0];
             return <button key={item.id} className={`${String(selectedItem?.id) === String(item.id) ? 'bogo-product-card active' : 'bogo-product-card'} !grid min-h-[156px] !grid-cols-1 content-start gap-2 p-3 text-left`} onClick={() => { setProductId(item.id); setVariantId(''); }}><span className="aspect-square h-20 w-full overflow-hidden rounded-lg border border-tph-border bg-tph-bg"><img className="!h-full !w-full object-cover" src={productImage(item)} alt="" loading="lazy" /></span><span className="grid gap-1"><strong className="line-clamp-2 text-sm leading-tight">{item.name}</strong><small className="font-extrabold text-tph-primary">{cheapestEligible ? `${inr(effectiveVariantPrice(item, cheapestEligible))} FREE` : 'No eligible size'}</small></span></button>;
           })}
         </div>
@@ -644,7 +699,7 @@ function BogoFreePizzaModal({ unlock, items, categories, onClose, onAdd }) {
           <div className="bogo-size-grid">
             {sizeVariants.map(variant => {
               const variantPrice = effectiveVariantPrice(selectedItem, variant);
-              const tooHigh = variantPrice > Number(unlock.line.price);
+              const tooHigh = variantPrice > Number(unlock.line.price) || (requiredFreeSize !== '' && variant.name !== requiredFreeSize);
               return <button type="button" key={variant.id} className={`${tooHigh ? 'bogo-size-option disabled' : 'bogo-size-option'} ${String(selectedVariant?.id) === String(variant.id) ? 'active !border-tph-primary !ring-2 !ring-tph-primary/20' : ''}`} onClick={() => !tooHigh && setVariantId(variant.id)} disabled={tooHigh}><strong>{sizeLabel(variant.name)}</strong><span>{inr(variantPrice)} {tooHigh ? '' : 'FREE'}</span>{tooHigh ? <small>Exceeds {inr(unlock.line.price)} limit</small> : <small>Eligible free size</small>}</button>;
             })}
           </div>
@@ -684,6 +739,7 @@ export default function Home() {
   const [activeBogoWeekday, setActiveBogoWeekday] = useState('');
   const [bogoRulesLoaded, setBogoRulesLoaded] = useState(false);
   const [bogoPicker, setBogoPicker] = useState(null);
+  const menuFingerprintRef = useRef('');
 
   useEffect(() => {
     setThemeModeState(storedThemeMode() || 'system');
@@ -734,6 +790,40 @@ export default function Home() {
   useEffect(() => {
     if (cartReady) saveCart(cart);
   }, [cart, cartReady]);
+
+  const refreshMenu = useCallback(() => {
+    api('/menu').then(m => {
+      const uniqueItems = Array.from(new Map((m.items || []).map(item => [String(item.id), item])).values());
+      const groups = m.option_groups || [];
+      const fingerprint = JSON.stringify(uniqueItems.map(item => [item.id, item.price, item.category_id, item.is_active, (item.variants || []).map(v => [v.id, v.name, v.price, v.is_default, v.is_active])])) + JSON.stringify(groups.map(g => [g.id, (g.options || []).map(o => [o.id, o.small_price, o.medium_price, o.large_price, o.fixed_price])]));
+      const catalogChanged = menuFingerprintRef.current !== '' && menuFingerprintRef.current !== fingerprint;
+      menuFingerprintRef.current = fingerprint;
+      setCategories(m.categories || []);
+      setItems(uniqueItems);
+      setOptionGroups(groups);
+      setModalItem(current => {
+        if (!current) return current;
+        return uniqueItems.find(item => String(item.id) === String(current.id)) || current;
+      });
+      setCart(current => {
+        if (!current.length) return current;
+        const next = reconcileBogoCart(current.map(line => repriceCartLine(line, uniqueItems, groups)), bogoRulesLoaded ? (line => matchBogoOfferForLine(line, activeBogoOffers, activeBogoWeekday)) : null);
+        return sameCart(current, next) ? current : next;
+      });
+      if (catalogChanged && !message) notify('Menu updated with the latest saved prices.', 'success');
+    }).catch(() => {});
+  }, [bogoRulesLoaded, activeBogoOffers, activeBogoWeekday, message]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onFocus = () => refreshMenu();
+    const timer = setInterval(() => refreshMenu(), 60000);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refreshMenu]);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search.trim()), 180);
@@ -996,7 +1086,7 @@ export default function Home() {
   const bogoUnlocks = useMemo(() => cart
     .filter(line => !line.is_bogo_free)
     .map(line => ({ line, offer: offerForLine(line), chosen: cart.filter(row => row.is_bogo_free && bogoGroupKey(row) === bogoGroupKey(line)).reduce((sum, row) => sum + row.quantity, 0) }))
-    .filter(unlock => unlock.offer && unlock.chosen < unlock.line.quantity), [cart, offerForLine]);
+    .filter(unlock => unlock.offer && unlock.chosen < bogoCapacity(unlock.offer, unlock.line.quantity)), [cart, offerForLine]);
 
   function changeFreePizza(paidLine, freeLine) {
     qty(freeLine.key || freeLine.id, -freeLine.quantity);
@@ -1117,8 +1207,8 @@ export default function Home() {
         </div>
       ) : null}
 
-      <OptionModal item={modalItem} optionGroups={optionGroups} onClose={() => setModalItem(null)} onAdd={addLine} />
-      <BogoFreePizzaModal unlock={bogoPicker} items={items} categories={categories} onClose={() => setBogoPicker(null)} onAdd={addLine} />
+      <OptionModal key={modalItem ? `product-${modalItem.id}` : 'product-none'} item={modalItem} optionGroups={optionGroups} onClose={() => setModalItem(null)} onAdd={addLine} />
+      <BogoFreePizzaModal key={bogoPicker ? `bogo-${bogoGroupKey(bogoPicker.line)}-${bogoPicker.offer?.id}` : 'bogo-none'} unlock={bogoPicker} items={items} categories={categories} weekday={activeBogoWeekday} onClose={() => setBogoPicker(null)} onAdd={addLine} />
       <OfferPopup popup={promotions.popup} />
       {categoryMoreOpen ? (
         <div className="category-more-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setCategoryMoreOpen(false); }}>
