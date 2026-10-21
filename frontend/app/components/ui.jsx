@@ -1,4 +1,8 @@
-import { X } from 'lucide-react';
+'use client';
+
+import { useCallback, useId, useState } from 'react';
+import { CircleAlert, CircleCheck, Info, TriangleAlert, X } from 'lucide-react';
+import useDialogFocus from './useDialogFocus';
 
 function cn(...classes) {
   return classes.filter(Boolean).join(' ');
@@ -68,11 +72,13 @@ export function Badge({ className = '', tone = 'neutral', children }) {
 }
 
 export function Modal({ title, children, onClose, className = '' }) {
+  const titleId = useId();
+  const dialogRef = useDialogFocus(true, onClose);
   return (
-    <div className="fixed inset-0 z-[80] grid place-items-center bg-black/45 p-5" role="dialog" aria-modal="true">
+    <div ref={dialogRef} tabIndex={-1} className="fixed inset-0 z-[80] grid place-items-center bg-black/45 p-5" role="dialog" aria-modal="true" aria-labelledby={titleId}>
       <section className={cn('max-h-[calc(100vh-40px)] w-full max-w-xl overflow-auto rounded-2xl border border-tph-border bg-tph-surface shadow-tph', className)}>
         <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-tph-border bg-tph-surface p-5">
-          <h2 className="m-0 text-2xl font-black">{title}</h2>
+          <h2 id={titleId} className="m-0 text-2xl font-black">{title}</h2>
           <Button type="button" variant="ghost" className="h-10 w-10 rounded-full p-0" onClick={onClose} aria-label="Close">
             <X size={18} />
           </Button>
@@ -83,10 +89,11 @@ export function Modal({ title, children, onClose, className = '' }) {
   );
 }
 
-export function Drawer({ children, side = 'right', className = '' }) {
+export function Drawer({ children, side = 'right', className = '', title = 'Panel', onClose }) {
+  const dialogRef = useDialogFocus(Boolean(onClose), onClose);
   return (
     <div className="fixed inset-0 z-[80] bg-black/45">
-      <aside className={cn('fixed bottom-0 top-0 w-full max-w-md overflow-auto bg-tph-surface p-5 shadow-tph', side === 'left' ? 'left-0' : 'right-0', className)}>
+      <aside ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={title} className={cn('fixed bottom-0 top-0 w-full max-w-md overflow-auto bg-tph-surface p-5 shadow-tph', side === 'left' ? 'left-0' : 'right-0', className)}>
         {children}
       </aside>
     </div>
@@ -112,7 +119,7 @@ export function Tabs({ tabs, active, onChange, className = '' }) {
   return (
     <div className={cn('flex gap-2 overflow-x-auto rounded-full border border-tph-border bg-tph-surface p-1', className)}>
       {tabs.map(tab => (
-        <button key={tab.value} type="button" className={cn('rounded-full px-4 py-2 text-sm font-extrabold transition', active === tab.value ? 'bg-tph-primary text-white' : 'text-tph-text/70 hover:bg-tph-primary/10')} onClick={() => onChange(tab.value)}>
+        <button key={tab.value} type="button" aria-pressed={active === tab.value} className={cn('rounded-full px-4 py-2 text-sm font-extrabold transition', active === tab.value ? 'bg-tph-primary text-white' : 'text-tph-text/70 hover:bg-tph-primary/10')} onClick={() => onChange(tab.value)}>
           {tab.label}
         </button>
       ))}
@@ -128,12 +135,45 @@ export function Dropdown({ className = '', children, ...props }) {
   );
 }
 
-export function Toast({ tone = 'info', children }) {
-  const tones = {
-    info: 'border-tph-border bg-tph-surface',
-    success: 'border-green-700 bg-green-50 text-green-900 dark:bg-green-950/50 dark:text-green-100',
-    warning: 'border-amber-600 bg-amber-50 text-amber-900 dark:bg-amber-950/50 dark:text-amber-100',
-    error: 'border-red-700 bg-red-50 text-red-900 dark:bg-red-950/50 dark:text-red-100'
-  };
-  return <p className={cn('rounded-lg border px-4 py-3 font-bold', tones[tone] || tones.info)}>{children}</p>;
+export function safeNoticeMessage(value) {
+  const message = String(value ?? '').trim();
+  if (!message) return '';
+  if (/SQLSTATE|PDOException|(?:Fatal|Parse) error|(?:stack trace|traceback)|\bat (?:async )?[\w.$]+\s*\(|[A-Za-z]:[\\/]|\/(?:var|home|srv|usr|etc)\/|\b(?:sk_live_|sk_test_|ghp_|github_pat_|AIza|xox[baprs]-)/i.test(message)) {
+    return 'Something went wrong. Please try again.';
+  }
+  if (/^(?:Failed to fetch|NetworkError|Load failed)$/i.test(message)) {
+    return 'Unable to connect. Check your connection and try again.';
+  }
+  return message.slice(0, 1200);
+}
+
+// A single visible message replaces the previous one. Unchanged polling errors
+// retain their identity, so they do not create duplicate screen-reader alerts.
+export function useToastMessage(initialTone = 'error') {
+  const [notice, setNotice] = useState({ message: '', tone: initialTone });
+  const setMessage = useCallback((value, tone = initialTone) => {
+    setNotice(current => {
+      const message = safeNoticeMessage(typeof value === 'function' ? value(current.message) : value);
+      const nextTone = ['success', 'warning', 'error', 'info'].includes(tone) ? tone : 'info';
+      return current.message === message && current.tone === nextTone ? current : { message, tone: nextTone };
+    });
+  }, [initialTone]);
+  return [notice.message, setMessage, notice.tone];
+}
+
+export function Toast({ tone = 'info', children, onDismiss, className = '' }) {
+  const normalizedTone = ['success', 'warning', 'error', 'info'].includes(tone) ? tone : 'info';
+  const icons = { success: CircleCheck, warning: TriangleAlert, error: CircleAlert, info: Info };
+  const Icon = icons[normalizedTone];
+  const labels = { success: 'Success', warning: 'Warning', error: 'Error', info: 'Information' };
+  const message = typeof children === 'string' ? safeNoticeMessage(children) : children;
+  return (
+    <div className={cn('notice app-toast', normalizedTone, className)}>
+      <Icon className="app-toast-icon" size={20} aria-hidden="true" />
+      <div className="app-toast-message" role={normalizedTone === 'error' ? 'alert' : 'status'} aria-live={normalizedTone === 'error' ? 'assertive' : 'polite'} aria-atomic="true">
+        <span className="sr-only">{labels[normalizedTone]}: </span>{message}
+      </div>
+      {onDismiss ? <button type="button" className="app-toast-dismiss" onClick={onDismiss} aria-label="Dismiss notification"><X size={18} aria-hidden="true" /></button> : null}
+    </div>
+  );
 }

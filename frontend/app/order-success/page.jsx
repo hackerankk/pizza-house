@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Bike, CheckCircle2, CreditCard, FileText, Printer, Share2, Store } from 'lucide-react';
 import { api, applyTheme, downloadInvoice, itemSelectionText, itemVariantText, openInvoice, orderAccessQuery, rememberGuestOrder, inr, whatsappOrderSummary } from '../lib';
+import { ErrorState, LoadingState } from '../components/AsyncState';
+import { Toast, useToastMessage } from '../components/ui';
 
 function statusLabel(status) {
   return String(status || '').replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase());
@@ -17,25 +19,38 @@ function OrderSuccessContent() {
   const [order, setOrder] = useState(null);
   const [items, setItems] = useState([]);
   const [payments, setPayments] = useState([]);
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useToastMessage();
+  const [loading, setLoading] = useState(true);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setMessage('');
+    setOrder(null);
+    setItems([]);
+    setPayments([]);
     Promise.all([api('/theme'), api('/settings')]).then(([themeData, settingsData]) => applyTheme(themeData.theme, settingsData.settings?.customer_default_theme || 'system')).catch(() => {});
     if (!orderId) {
       setMessage('Missing order reference.');
+      setLoading(false);
       return;
     }
     if (guestAccessToken) rememberGuestOrder(orderId, guestAccessToken);
     const accessQuery = orderAccessQuery(orderId, guestAccessToken);
     api(`/orders/${orderId}/track${accessQuery ? `?${accessQuery}` : ''}`).then(data => {
+      if (cancelled) return;
       setOrder(data.order);
       setItems(data.items || []);
       setPayments(data.payments || []);
-    }).catch(err => setMessage(err.message));
-  }, [orderId, guestAccessToken]);
+    }).catch(err => { if (!cancelled) setMessage(err.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [orderId, guestAccessToken, loadAttempt, setMessage]);
 
   const payment = useMemo(() => payments.find(row => row.status === 'verified') || payments[payments.length - 1], [payments]);
   const takeaway = order?.order_type === 'takeaway';
+  const confirmed = ['Paid', 'Partially Paid', 'COD'].includes(order?.payment_status);
   const accessQuery = order ? orderAccessQuery(order.id, guestAccessToken) : '';
   const invoicePath = order ? `/orders/${order.id}/invoice${accessQuery ? `?${accessQuery}` : ''}` : '';
 
@@ -55,13 +70,13 @@ function OrderSuccessContent() {
   return (
     <main className="confirmation-page">
       <section className="container confirmation-card">
-        {message ? <p className="notice error">{message}</p> : null}
-        {!order ? <div className="empty-state">Loading order summary...</div> : (
+        {message && order ? <Toast tone="error" onDismiss={() => setMessage('')}>{message}</Toast> : null}
+        {loading ? <LoadingState label="Loading your order summary…" rows={6} /> : !order ? <ErrorState title="Order summary is unavailable" message={message || 'We could not retrieve this order. Please check your connection and try again.'} onRetry={orderId ? () => setLoadAttempt(attempt => attempt + 1) : undefined}><Link className="button ghost" href="/account">View your orders</Link><Link className="button ghost" href="/#menu">Back to menu</Link></ErrorState> : (
           <>
             <div className="success-mark"><CheckCircle2 size={34} /></div>
-            <span className="eyebrow">Order Confirmed</span>
+            <span className="eyebrow">{confirmed ? 'Order Confirmed' : 'Order received'}</span>
             <h1>{order.order_number}</h1>
-            <p>{takeaway ? 'Takeaway / Pickup' : 'Delivery'} order confirmed after server-side payment verification.</p>
+            <p>{takeaway ? 'Takeaway / Pickup' : 'Delivery'} {order.payment_status === 'COD' ? 'order received. Payment is due on delivery.' : confirmed ? 'order confirmed after server-side payment verification.' : 'order received. Payment confirmation is still pending; check the payment status below.'}</p>
             <div className="confirmation-grid">
               <div><span>Order ID</span><strong>{order.order_number}</strong></div>
               <div><span>Payment ID</span><strong>{order.razorpay_payment_id || payment?.razorpay_payment_id || 'Not available'}</strong></div>
@@ -112,5 +127,5 @@ function OrderSuccessContent() {
 }
 
 export default function OrderSuccessPage() {
-  return <Suspense fallback={<main className="confirmation-page"><section className="container confirmation-card">Loading order summary...</section></main>}><OrderSuccessContent /></Suspense>;
+  return <Suspense fallback={<main className="confirmation-page"><section className="container confirmation-card"><LoadingState label="Loading your order summary…" rows={6} /></section></main>}><OrderSuccessContent /></Suspense>;
 }

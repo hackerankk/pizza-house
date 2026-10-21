@@ -5,13 +5,21 @@ import Link from 'next/link';
 import Script from 'next/script';
 import { Bell, Camera, Clock, CreditCard, Eye, FileText, Gift, KeyRound, LayoutDashboard, LogOut, Mail, MapPinned, Megaphone, Menu, Minus, Palette, Plus, Power, Printer, RotateCcw, Save, Search, Settings, ShieldAlert, ShoppingBag, Tag, Trash2, Truck, Upload, UserRound, Utensils, X } from 'lucide-react';
 import { API_BASE, adminApi, adminLogout, adminUploadApi, api, applyTheme, clearToken, downloadInvoice, inr, itemSelectionText, itemVariantText, openInvoice, productImage, refreshAdminSession, setThemeMode, setToken, storedThemeMode, token } from '../lib';
+import { safeNoticeMessage, Toast, useToastMessage } from '../components/ui';
+import { EmptyState, ErrorState, LoadingState } from '../components/AsyncState';
+import OptimizedImage from '../components/OptimizedImage';
+import { reducedMotionPreferred, scrollBehavior } from '../motion';
+import useDialogFocus from '../components/useDialogFocus';
+import { editableLine, idList, optionAppliesTo, orderLinePayload, removeLineAndFreeChildren, selectionSignature } from './admin-order-editing.mjs';
 
 const resources = {
+  toppings: ['name', 'group_name', 'fixed_price', 'small_price', 'medium_price', 'large_price', 'applies_to', 'category_ids', 'product_ids', 'is_active'],
   products: ['category_id', 'name', 'description', 'price', 'stock', 'low_stock_threshold', 'image_url', 'is_active'],
   categories: ['name', 'description', 'image_url', 'sort_order', 'is_active'],
   coupons: ['code', 'discount_type', 'discount_value', 'min_order_value', 'max_discount', 'starts_at', 'expires_at', 'overall_usage_limit', 'per_customer_limit', 'is_active'],
   offers: ['name', 'offer_type', 'applies_to', 'category_ids', 'product_ids', 'discount_value', 'weekdays', 'size_rules', 'start_time', 'end_time', 'buy_product_id', 'buy_qty', 'free_product_id', 'get_qty', 'starts_at', 'expires_at', 'is_active'],
-  'delivery-slabs': ['min_order_amount', 'free_delivery_distance_km', 'free_delivery_enabled', 'charge', 'priority', 'is_active'],
+  'delivery-slabs': ['min_order_amount', 'min_km', 'max_km', 'free_delivery_distance_km', 'free_delivery_enabled', 'charge', 'priority', 'is_active'],
+  'staff-delivery-slabs': ['name', 'min_order_amount', 'max_order_amount', 'charge', 'priority', 'is_active'],
   'promotional-banners': ['title', 'subtitle', 'image_url', 'button_text', 'destination_type', 'destination_value', 'display_order', 'start_at', 'end_at', 'is_active'],
   'promotional-marquee': ['message', 'link', 'display_order', 'start_at', 'end_at', 'is_active'],
   'promotional-popups': ['title', 'description', 'image_url', 'offer_text', 'button_text', 'destination_type', 'destination_value', 'display_frequency', 'display_order', 'start_at', 'end_at', 'is_active']
@@ -22,6 +30,7 @@ const tabs = [
   ['orders', 'Orders', ShoppingBag],
   ['payments', 'Payments', CreditCard],
   ['products', 'Products', Utensils],
+  ['toppings', 'Toppings / Add-Ons', Utensils],
   ['categories', 'Categories', Menu],
   ['coupons', 'Coupons', Tag],
   ['offers', 'Offers', Tag],
@@ -29,6 +38,7 @@ const tabs = [
   ['promotional-marquee', 'Promotional Marquee', Megaphone],
   ['promotional-popups', 'Offer Popup', Gift],
   ['delivery-slabs', 'Delivery Slabs', Truck],
+  ['staff-delivery-slabs', 'Staff Delivery Charges', Truck],
   ['delivery-boys', 'Delivery Boys', Truck],
   ['customers', 'Customers', UserRound],
   ['staff', 'Staff', UserRound],
@@ -45,11 +55,11 @@ const tabs = [
 
 const navSections = [
   { label: 'Main', items: ['dashboard', 'orders', 'payments'] },
-  { label: 'Catalog', items: ['products', 'categories', 'coupons', 'offers'] },
+  { label: 'Catalog', items: ['products', 'toppings', 'categories', 'coupons', 'offers'] },
   { label: 'Promotional', items: ['promotional-banners', 'promotional-marquee', 'promotional-popups'] },
   { label: 'People', items: ['customers', 'staff', 'staff-performance', 'delivery-boys'] },
   { label: 'Reports', items: ['reports-sales'] },
-  { label: 'Delivery', items: ['delivery-slabs'] },
+  { label: 'Delivery', items: ['delivery-slabs', 'staff-delivery-slabs'] },
   { label: 'Settings', items: ['order-availability', 'integrations', 'appearance', 'feature-controls'] },
   { label: 'More', items: ['theme', 'settings', 'notifications'] }
 ];
@@ -92,12 +102,15 @@ const staffPermissionLabels = {
   view_today_orders: ["Can View Today's Orders", 'Allow staff to see current-day order count.'],
   view_reports: ['Can View Reports', 'Allow staff report access if staff reports are exposed.'],
   apply_manual_discount: ['Can Apply Discounts', 'Allow staff to apply fixed, percentage, or BOGO discounts in POS.'],
+  manage_staff_bogo: ['Can Manage Staff BOGO Rules', 'Allow staff to save BOGO size choices and eligible pizzas for future staff orders. Customer offers stay separate.'],
+  apply_free_pizza: ['Can Add a Free Pizza', 'Allow staff to attach a free pizza to a paid pizza, with independently selected sizes.'],
+  free_pizza_cross_category: ['Can Give a Free Pizza from Another Category', 'Allow an authorized free-pizza action across pizza categories. Requires Can Add a Free Pizza.'],
   view_customer_history: ['Can View Customer History', 'Allow staff to look up repeat customers by mobile number.'],
   cancel_orders: ['Can Cancel Orders', 'Allow staff to cancel active POS orders.'],
   delete_orders: ['Can Delete Orders', 'Allow staff to request safe deletion where supported.']
 };
 
-const defaultStaffPermissions = Object.fromEntries(Object.keys(staffPermissionLabels).map(key => [key, !['edit_orders', 'view_reports', 'apply_manual_discount', 'view_customer_history', 'cancel_orders', 'delete_orders'].includes(key)]));
+const defaultStaffPermissions = Object.fromEntries(Object.keys(staffPermissionLabels).map(key => [key, !['edit_orders', 'view_reports', 'apply_manual_discount', 'manage_staff_bogo', 'apply_free_pizza', 'free_pizza_cross_category', 'view_customer_history', 'cancel_orders', 'delete_orders'].includes(key)]));
 
 const featureControlLabels = {
   customer_theme_enabled: ['Customer Theme', 'Show customer-facing theme controls in the website header/menu.'],
@@ -152,6 +165,12 @@ function adminLabel(field) {
     min_order_value: 'Minimum Order',
     max_discount: 'Maximum Discount',
     min_order_amount: 'Minimum Order',
+    max_order_amount: 'Maximum Order (optional)',
+    fixed_price: 'Base Price (INR)',
+    small_price: 'Small Pizza Price (INR)',
+    medium_price: 'Medium Pizza Price (INR)',
+    large_price: 'Large Pizza Price (INR)',
+    group_name: 'Option Type',
     free_delivery_distance_km: 'Free Delivery Distance',
     free_delivery_enabled: 'Free Delivery',
     charge: 'Delivery Charge',
@@ -226,7 +245,7 @@ function adminOrderActionLabel(order, status) {
 }
 
 function isAlertableOrder(order) {
-  return ['Paid', 'Partially Paid', 'COD'].includes(order.payment_status) && order.status === 'received';
+  return order.source === 'customer_online' && ['Paid', 'Partially Paid', 'COD'].includes(order.payment_status) && order.status === 'received';
 }
 
 function ToggleSwitch({ checked, onChange, label, description, disabled = false, danger = false }) {
@@ -295,6 +314,8 @@ function SizeRuleBuilder({ value = {}, onChange }) {
   const update = (day, size, freeSize) => onChange({ ...rules, [day]: { ...(rules[day] || {}), [size]: freeSize } });
   return (
     <div className="size-rule-builder">
+      <p className="small-note">Leave all rules empty to allow any eligible free size. Set mappings only when you want to restrict sizes.</p>
+      <button type="button" className="ghost" onClick={() => onChange({})}>Allow all sizes on all days</button>
       {weekDays.map(day => (
         <div className="size-rule-day" key={day}>
           <strong>{statusLabel(day)}</strong>
@@ -329,8 +350,9 @@ function ReportBreakdown({ title, rows = [] }) {
 }
 
 function OrderAlertModal({ order, alertCount, soundBlocked, alertsEnabled, onEnableSound, onView, onAccept }) {
+  const dialogRef = useDialogFocus(true, onView);
   return (
-    <div className="admin-modal-backdrop full-screen-alert" role="dialog" aria-modal="true" aria-label="New order alert">
+    <div ref={dialogRef} tabIndex={-1} className="admin-modal-backdrop full-screen-alert" role="dialog" aria-modal="true" aria-label="New order alert">
       <section className="admin-order-modal new-order-fullscreen-card">
         <div className="order-alert-icon"><Bell size={26} /></div>
         <span className="eyebrow">NEW ORDER RECEIVED</span>
@@ -356,8 +378,9 @@ function OrderAlertModal({ order, alertCount, soundBlocked, alertsEnabled, onEna
 }
 
 function AcceptOrderModal({ order, prepMinutes, customPrepMinutes, onPrepChange, onCustomChange, onClose, onAccept }) {
+  const dialogRef = useDialogFocus(true, onClose);
   return (
-    <div className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true" aria-label="Accept order">
+    <div ref={dialogRef} tabIndex={-1} className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true" aria-label="Accept order">
       <section className="admin-order-modal">
         <button className="icon-button modal-close" onClick={onClose} aria-label="Close preparation time dialog"><X size={18} /></button>
         <span className="eyebrow">Preparation time</span>
@@ -369,7 +392,7 @@ function AcceptOrderModal({ order, prepMinutes, customPrepMinutes, onPrepChange,
           ))}
           <button className={prepMinutes === 'custom' ? 'prep-choice active' : 'prep-choice'} onClick={() => onPrepChange('custom')}>Custom</button>
         </div>
-        {prepMinutes === 'custom' ? <input type="number" min="1" max="240" placeholder="Custom minutes" value={customPrepMinutes} onChange={event => onCustomChange(event.target.value)} /> : null}
+        {prepMinutes === 'custom' ? <input aria-label="Custom preparation time in minutes" type="number" min="1" max="240" placeholder="Custom minutes" value={customPrepMinutes} onChange={event => onCustomChange(event.target.value)} /> : null}
         <div className="action-row">
           <button className="ghost" onClick={onClose}>Cancel</button>
           <button onClick={onAccept}><Clock size={16} /> Accept Order</button>
@@ -382,12 +405,13 @@ function AcceptOrderModal({ order, prepMinutes, customPrepMinutes, onPrepChange,
 function OrderDetailsModal({ data, loading, onClose, onEditOrder, onViewInvoice, onDownloadInvoice, onEmailInvoice }) {
   const order = data?.order;
   const items = data?.items || [];
+  const dialogRef = useDialogFocus(Boolean(order || loading), onClose);
   if (!order && !loading) return null;
   return (
-    <div className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true" aria-label="Order details">
+    <div ref={dialogRef} tabIndex={-1} className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true" aria-label="Order details">
       <section className="admin-order-modal order-details-modal">
         <button className="icon-button modal-close" onClick={onClose} aria-label="Close order details"><X size={18} /></button>
-        {loading ? <div className="empty-state">Loading order details...</div> : (
+        {loading ? <LoadingState label="Loading order details…" rows={6} /> : (
           <>
             <span className="eyebrow">Order Details</span>
             <h2>{order.order_number}</h2>
@@ -407,15 +431,17 @@ function OrderDetailsModal({ data, loading, onClose, onEditOrder, onViewInvoice,
               <div><span>Change</span><strong>{inr(order.change_amount || order.cash_change || 0)}</strong></div>
             </div> : null}
             {order.delivery_address ? <p className="small-note"><strong>Address:</strong> {order.delivery_address}</p> : null}
+            {order.source === 'staff_offline' && order.staff_delivery_snapshot?.name ? <p className="small-note"><strong>Staff delivery charge:</strong> {order.staff_delivery_snapshot.name} · {inr(order.delivery_charge)}</p> : null}
             <div className="summary-items">
               {items.map(item => (
                 <div className="line-item" key={item.id}>
                   <span>
                     <strong>{item.name_snapshot}</strong>{itemVariantText(item) ? ` (${itemVariantText(item)})` : ''} x {item.quantity}{Number(item.free_quantity) > 0 ? ` + ${item.free_quantity} free` : ''}
-                    {itemSelectionText(item) ? <small>{itemSelectionText(item)}</small> : null}
-                    <small>Unit price: {inr(item.unit_price)}</small>
+                    {item.is_manual_free ? <small><span className="bogo-free-badge">FREE · Staff promotion</span> Regular {inr(item.manual_original_price)} each · discount {inr(item.manual_free_discount)}</small> : null}
+                    {(item.selection_meta?.options || []).length ? item.selection_meta.options.map(option => <small key={option.id}>{option.group_name}: {option.name} × {option.quantity || 1} · {inr(option.price)} each · {inr(option.line_total ?? Number(option.price) * Number(option.quantity || 1))} per item</small>) : itemSelectionText(item) ? <small>{itemSelectionText(item)}</small> : null}
+                    <small>{item.is_manual_free || item.is_bogo_free ? 'Payable unit price' : 'Unit price'}: {inr(item.is_manual_free || item.is_bogo_free ? 0 : item.unit_price)}</small>
                   </span>
-                  <strong>{inr(item.line_total)}</strong>
+                  <strong>{item.is_manual_free || item.is_bogo_free ? 'FREE · ₹0.00' : inr(item.line_total)}</strong>
                 </div>
               ))}
             </div>
@@ -442,10 +468,10 @@ function OrderDetailsModal({ data, loading, onClose, onEditOrder, onViewInvoice,
 }
 
 function editOptionPrice(option, variantName) {
-  if (variantName === 'S') return Number(option.small_price || option.fixed_price || 0);
-  if (variantName === 'M') return Number(option.medium_price || option.fixed_price || 0);
-  if (variantName === 'L') return Number(option.large_price || option.fixed_price || 0);
-  return Number(option.fixed_price || option.small_price || 0);
+  if (variantName === 'S') return Number(option.small_price ?? option.fixed_price ?? 0);
+  if (variantName === 'M') return Number(option.medium_price ?? option.fixed_price ?? 0);
+  if (variantName === 'L') return Number(option.large_price ?? option.fixed_price ?? 0);
+  return Number(option.fixed_price ?? option.small_price ?? 0);
 }
 
 function editVariantLabel(name) {
@@ -457,28 +483,16 @@ function editVariantLabel(name) {
 
 function OrderEditModal({ data, menu, saving, onClose, onSave }) {
   const order = data?.order;
+  const dialogRef = useDialogFocus(Boolean(order), onClose);
   const menuItems = menu?.items || [];
   const categories = menu?.categories || [];
   const optionGroups = menu?.option_groups || [];
   const [lines, setLines] = useState([]);
-  const [addDraft, setAddDraft] = useState({ q: '', category_id: '', item_id: '', variant_id: '', option_ids: [], quantity: 1 });
+  const [addDraft, setAddDraft] = useState({ q: '', category_id: '', item_id: '', variant_id: '', option_selections: [], quantity: 1 });
 
   useEffect(() => {
     if (!data?.items) return;
-    setLines(data.items.map(item => {
-      const optionIds = (item.selection_meta?.options || []).map(option => Number(option.id)).filter(Boolean);
-      return {
-        rowKey: `existing-${item.id}`,
-        id: Number(item.menu_item_id),
-        name: item.name_snapshot,
-        variant_id: item.variant_id || '',
-        variant_name: item.variant_snapshot || '',
-        option_ids: optionIds,
-        quantity: Math.max(1, Number(item.quantity || 1)),
-        is_bogo_free: Boolean(item.is_bogo_free),
-        bogo_parent_key: item.bogo_parent_key || '',
-      };
-    }));
+    setLines(data.items.map(editableLine));
   }, [data]);
 
   if (!order) return null;
@@ -492,8 +506,7 @@ function OrderEditModal({ data, menu, saving, onClose, onSave }) {
   const selectedVariant = selectedProduct?.variants?.find(variant => String(variant.id) === String(addDraft.variant_id)) || selectedProduct?.variants?.find(variant => Number(variant.is_default) === 1) || selectedProduct?.variants?.[0] || null;
   const addOptionRows = optionGroups.flatMap(group => (group.options || []).map(option => ({ ...option, group_name: group.name }))).filter(option => {
     if (!selectedProduct) return false;
-    const isPizza = ['S', 'M', 'L'].includes(selectedVariant?.name);
-    return isPizza || (option.applies_to || 'pizza') !== 'pizza';
+    return optionAppliesTo(option, selectedProduct, selectedVariant?.name);
   });
 
   function productForLine(line) {
@@ -503,8 +516,9 @@ function OrderEditModal({ data, menu, saving, onClose, onSave }) {
   function optionRowsForLine(line) {
     const product = productForLine(line);
     const variant = product?.variants?.find(v => String(v.id) === String(line.variant_id)) || null;
-    const isPizza = ['S', 'M', 'L'].includes(variant?.name || line.variant_name);
-    return optionGroups.flatMap(group => (group.options || []).map(option => ({ ...option, group_name: group.name }))).filter(option => isPizza || (option.applies_to || 'pizza') !== 'pizza');
+    const available = optionGroups.flatMap(group => (group.options || []).map(option => ({ ...option, group_name: group.name }))).filter(option => optionAppliesTo(option, product, variant?.name || line.variant_name));
+    const archived = (line.originalOptions || []).filter(option => !available.some(current => Number(current.id) === Number(option.id)) && (line.option_selections || []).some(selected => selected.id === Number(option.id))).map(option => ({ ...option, historical: true }));
+    return [...available, ...archived];
   }
 
   function changeLine(rowKey, patch) {
@@ -514,42 +528,59 @@ function OrderEditModal({ data, menu, saving, onClose, onSave }) {
   function addLine() {
     if (!selectedProduct) return;
     const variant = selectedVariant;
-    const optionIds = (addDraft.option_ids || []).map(Number).sort((a, b) => a - b);
     setLines(current => [...current, {
       rowKey: `new-${Date.now()}-${Math.random()}`,
       id: Number(selectedProduct.id),
       name: selectedProduct.name,
       variant_id: variant?.id || '',
       variant_name: variant?.name || '',
-      option_ids: optionIds,
+      option_selections: addDraft.option_selections || [],
       quantity: Math.max(1, Number(addDraft.quantity || 1)),
       is_bogo_free: false,
       bogo_parent_key: '',
+      is_manual_free: false,
+      manual_parent_key: '',
     }]);
-    setAddDraft({ q: '', category_id: addDraft.category_id, item_id: '', variant_id: '', option_ids: [], quantity: 1 });
+    setAddDraft({ q: '', category_id: addDraft.category_id, item_id: '', variant_id: '', option_selections: [], quantity: 1 });
   }
 
   function toggleAddOption(optionId, checked) {
-    setAddDraft(current => ({ ...current, option_ids: checked ? [...current.option_ids, Number(optionId)] : current.option_ids.filter(id => Number(id) !== Number(optionId)) }));
+    setAddDraft(current => ({ ...current, option_selections: checked ? [...current.option_selections.filter(option => option.id !== Number(optionId)), { id: Number(optionId), quantity: 1 }] : current.option_selections.filter(option => option.id !== Number(optionId)) }));
   }
 
   function toggleLineOption(line, optionId, checked) {
-    const next = checked ? [...(line.option_ids || []), Number(optionId)] : (line.option_ids || []).filter(id => Number(id) !== Number(optionId));
-    changeLine(line.rowKey, { option_ids: Array.from(new Set(next)) });
+    const current = line.option_selections || [];
+    const next = checked ? [...current.filter(option => option.id !== Number(optionId)), { id: Number(optionId), quantity: 1 }] : current.filter(option => option.id !== Number(optionId));
+    changeLine(line.rowKey, { option_selections: next });
   }
 
   function localUnit(line) {
     const product = productForLine(line);
-    if (!product) return 0;
+    if (line.originalSignature === selectionSignature(line)) return line.originalUnitPrice;
+    if (!product) return line.originalUnitPrice || 0;
     const variant = product.variants?.find(v => String(v.id) === String(line.variant_id)) || product.variants?.[0] || null;
-    const options = optionRowsForLine(line).filter(option => (line.option_ids || []).includes(Number(option.id)));
-    return effectiveVariantPrice(product, variant) + options.reduce((sum, option) => sum + editOptionPrice(option, variant?.name || line.variant_name), 0);
+    const options = optionRowsForLine(line).filter(option => (line.option_selections || []).some(selected => selected.id === Number(option.id)));
+    return effectiveVariantPrice(product, variant) + options.reduce((sum, option) => sum + (option.historical ? Number(option.price) : editOptionPrice(option, variant?.name || line.variant_name)) * Number(line.option_selections.find(selected => selected.id === Number(option.id))?.quantity || 1), 0);
+  }
+
+  function renderOptionControls(options, variantName, selections, onToggle, onQuantity, originalOptions = [], usingSnapshot = false) {
+    if (!options.length) return null;
+    return <fieldset className="order-edit-options"><legend>Toppings / Add-Ons</legend>{options.map(option => {
+      const selected = selections.find(row => row.id === Number(option.id));
+      const recorded = originalOptions.find(row => Number(row.id) === Number(option.id));
+      const price = usingSnapshot && recorded ? Number(recorded.price) : option.historical ? Number(option.price) : editOptionPrice(option, variantName);
+      return <div key={option.id}>
+        <label><input type="checkbox" checked={Boolean(selected)} onChange={event => onToggle(option.id, event.target.checked)} />{option.group_name}: {option.name} · {inr(price)} each{usingSnapshot && recorded ? ' (recorded)' : ''}{option.historical ? ' · unavailable for new selections' : ''}</label>
+        {selected ? <label style={{ flexWrap: 'wrap' }}>Quantity<input style={{ width: '4.5rem', minWidth: 0 }} type="number" min="1" max="20" step="1" aria-label={`Quantity of ${option.name}`} value={selected.quantity} onChange={event => onQuantity(option.id, Math.max(1, Math.min(20, Math.trunc(Number(event.target.value) || 1))))} /><small>{inr(price * selected.quantity)} per item</small></label> : null}
+      </div>;
+    })}</fieldset>;
   }
 
   const localSubtotal = lines.reduce((sum, line) => sum + localUnit(line) * Number(line.quantity || 1), 0);
+  const localFreeDiscount = lines.filter(line => line.is_manual_free || line.is_bogo_free).reduce((sum, line) => sum + localUnit(line) * Number(line.quantity || 1), 0);
 
   return (
-    <div className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true" aria-label="Edit order">
+    <div ref={dialogRef} tabIndex={-1} className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true" aria-label="Edit order">
       <section className="admin-order-modal order-edit-modal">
         <button className="icon-button modal-close" onClick={onClose} aria-label="Close edit order"><X size={18} /></button>
         <span className="eyebrow">Edit Order</span>
@@ -567,20 +598,20 @@ function OrderEditModal({ data, menu, saving, onClose, onSave }) {
             {lines.map(line => {
               const product = productForLine(line);
               const variants = product?.variants || [];
-              const variant = variants.find(v => String(v.id) === String(line.variant_id)) || variants[0] || null;
+              const variant = variants.find(v => String(v.id) === String(line.variant_id)) || null;
               const optionRows = optionRowsForLine(line);
               return (
                 <article className="order-edit-line" key={line.rowKey}>
                   <div>
-                    <strong>{line.name || product?.name || 'Menu item'} {line.is_bogo_free ? <span className="bogo-free-badge">FREE</span> : null}</strong>
-                    <small>{editVariantLabel(variant?.name || line.variant_name)} · {inr(localUnit(line))} each</small>
+                    <strong>{line.name || product?.name || 'Menu item'} {line.is_bogo_free || line.is_manual_free ? <span className="bogo-free-badge">FREE{line.is_manual_free ? ' · Staff promotion' : ''}</span> : null}</strong>
+                    <small>{editVariantLabel(variant?.name || line.variant_name)} · {line.is_manual_free || line.is_bogo_free ? 'Regular price ' : ''}{inr(localUnit(line))} each{line.is_manual_free || line.is_bogo_free ? ` · discount ${inr(localUnit(line) * Number(line.quantity))}` : ''}</small>
                   </div>
-                  {variants.length ? <select value={line.variant_id || ''} onChange={event => changeLine(line.rowKey, { variant_id: event.target.value, variant_name: variants.find(v => String(v.id) === event.target.value)?.name || '', option_ids: [] })}>{variants.map(variantRow => <option key={variantRow.id} value={variantRow.id}>{editVariantLabel(variantRow.name)} · {inr(effectiveVariantPrice(product, variantRow))}</option>)}</select> : null}
-                  {optionRows.length ? <div className="order-edit-options">{optionRows.map(option => <label key={option.id}><input type="checkbox" checked={(line.option_ids || []).includes(Number(option.id))} onChange={event => toggleLineOption(line, option.id, event.target.checked)} /> {option.group_name}: {option.name} <span>+{inr(editOptionPrice(option, variant?.name || line.variant_name))}</span></label>)}</div> : null}
+                  {variants.length ? <select aria-label={`Size or variant for ${line.name || product?.name || 'menu item'}`} value={line.variant_id || ''} onChange={event => changeLine(line.rowKey, { variant_id: event.target.value, variant_name: variants.find(v => String(v.id) === event.target.value)?.name || '', option_selections: [] })}>{!variant ? <option value={line.variant_id || ''} disabled>{editVariantLabel(line.variant_name)} · recorded variant</option> : null}{variants.map(variantRow => <option key={variantRow.id} value={variantRow.id}>{editVariantLabel(variantRow.name)} · {inr(effectiveVariantPrice(product, variantRow))}</option>)}</select> : null}
+                  {renderOptionControls(optionRows, variant?.name || line.variant_name, line.option_selections || [], (id, checked) => toggleLineOption(line, id, checked), (id, quantity) => changeLine(line.rowKey, { option_selections: line.option_selections.map(option => option.id === Number(id) ? { ...option, quantity } : option) }), line.originalOptions, line.originalSignature === selectionSignature(line))}
                   <div className="order-edit-line-actions">
-                    <div className="quantity-control small"><button onClick={() => changeLine(line.rowKey, { quantity: Math.max(1, Number(line.quantity) - 1) })}><Minus size={14} /></button><strong>{line.quantity}</strong><button onClick={() => changeLine(line.rowKey, { quantity: Number(line.quantity) + 1 })}><Plus size={14} /></button></div>
-                    <strong>{line.is_bogo_free ? 'FREE' : inr(localUnit(line) * Number(line.quantity))}</strong>
-                    <button className="ghost danger" onClick={() => { if (window.confirm('Remove this item from the order?')) setLines(current => current.filter(row => row.rowKey !== line.rowKey)); }}><Trash2 size={15} /> Remove</button>
+                    <div className="quantity-control small"><button aria-label={`Decrease quantity of ${line.name || product?.name || 'menu item'}`} onClick={() => changeLine(line.rowKey, { quantity: Math.max(1, Number(line.quantity) - 1) })}><Minus size={14} /></button><strong>{line.quantity}</strong><button aria-label={`Increase quantity of ${line.name || product?.name || 'menu item'}`} onClick={() => changeLine(line.rowKey, { quantity: Number(line.quantity) + 1 })}><Plus size={14} /></button></div>
+                    <strong>{line.is_bogo_free || line.is_manual_free ? 'FREE' : inr(localUnit(line) * Number(line.quantity))}</strong>
+                    <button className="ghost danger" onClick={() => { if (window.confirm('Remove this item and any linked free pizza from the order?')) setLines(current => removeLineAndFreeChildren(current, line.rowKey)); }}><Trash2 size={15} /> Remove</button>
                   </div>
                 </article>
               );
@@ -589,21 +620,22 @@ function OrderEditModal({ data, menu, saving, onClose, onSave }) {
           </section>
           <section className="order-edit-add">
             <h3>Add Item</h3>
-            <label className="search-box"><Search size={18} /><input value={addDraft.q} onChange={event => setAddDraft({ ...addDraft, q: event.target.value })} placeholder="Search product" /></label>
-            <label>Category<select value={addDraft.category_id} onChange={event => setAddDraft({ ...addDraft, category_id: event.target.value, item_id: '', variant_id: '', option_ids: [] })}><option value="">All categories</option>{categories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
+            <label className="search-box"><Search size={18} aria-hidden="true" /><input aria-label="Search products to add" value={addDraft.q} onChange={event => setAddDraft({ ...addDraft, q: event.target.value })} placeholder="Search product" /></label>
+            <label>Category<select value={addDraft.category_id} onChange={event => setAddDraft({ ...addDraft, category_id: event.target.value, item_id: '', variant_id: '', option_selections: [] })}><option value="">All categories</option>{categories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
             <label>Product<select value={addDraft.item_id} onChange={event => {
               const product = menuItems.find(item => String(item.id) === event.target.value);
               const variant = product?.variants?.find(v => Number(v.is_default) === 1) || product?.variants?.[0] || null;
-              setAddDraft({ ...addDraft, item_id: event.target.value, variant_id: variant?.id || '', option_ids: [] });
+              setAddDraft({ ...addDraft, item_id: event.target.value, variant_id: variant?.id || '', option_selections: [] });
             }}><option value="">Select product</option>{filteredProducts.map(product => <option key={product.id} value={product.id}>{product.name}</option>)}</select></label>
-            {selectedProduct?.variants?.length ? <label>Size / Variant<select value={addDraft.variant_id || selectedVariant?.id || ''} onChange={event => setAddDraft({ ...addDraft, variant_id: event.target.value, option_ids: [] })}>{selectedProduct.variants.map(variant => <option key={variant.id} value={variant.id}>{editVariantLabel(variant.name)} · {inr(effectiveVariantPrice(selectedProduct, variant))}</option>)}</select></label> : null}
-            {addOptionRows.length ? <div className="order-edit-options">{addOptionRows.map(option => <label key={option.id}><input type="checkbox" checked={(addDraft.option_ids || []).includes(Number(option.id))} onChange={event => toggleAddOption(option.id, event.target.checked)} /> {option.group_name}: {option.name} <span>+{inr(editOptionPrice(option, selectedVariant?.name))}</span></label>)}</div> : null}
-            <div className="quantity-control"><button onClick={() => setAddDraft({ ...addDraft, quantity: Math.max(1, Number(addDraft.quantity) - 1) })}><Minus size={14} /></button><strong>{addDraft.quantity}</strong><button onClick={() => setAddDraft({ ...addDraft, quantity: Number(addDraft.quantity) + 1 })}><Plus size={14} /></button></div>
+            {selectedProduct?.variants?.length ? <label>Size / Variant<select value={addDraft.variant_id || selectedVariant?.id || ''} onChange={event => setAddDraft({ ...addDraft, variant_id: event.target.value, option_selections: [] })}>{selectedProduct.variants.map(variant => <option key={variant.id} value={variant.id}>{editVariantLabel(variant.name)} · {inr(effectiveVariantPrice(selectedProduct, variant))}</option>)}</select></label> : null}
+            {renderOptionControls(addOptionRows, selectedVariant?.name, addDraft.option_selections, toggleAddOption, (id, quantity) => setAddDraft(current => ({ ...current, option_selections: current.option_selections.map(option => option.id === Number(id) ? { ...option, quantity } : option) })))}
+            <div className="quantity-control"><button aria-label="Decrease new item quantity" onClick={() => setAddDraft({ ...addDraft, quantity: Math.max(1, Number(addDraft.quantity) - 1) })}><Minus size={14} /></button><strong>{addDraft.quantity}</strong><button aria-label="Increase new item quantity" onClick={() => setAddDraft({ ...addDraft, quantity: Number(addDraft.quantity) + 1 })}><Plus size={14} /></button></div>
             <button onClick={addLine} disabled={!selectedProduct}><Plus size={16} /> Add Item</button>
           </section>
         </div>
         <div className="totals order-edit-summary">
           <div><span>Preview Subtotal</span><strong>{inr(localSubtotal)}</strong></div>
+          {localFreeDiscount > 0 ? <div><span>Preview Free Item Discount</span><strong>-{inr(localFreeDiscount)}</strong></div> : null}
           <div><span>Current Discount</span><strong>-{inr(order.discount_amount || 0)}</strong></div>
           <div><span>Current Delivery</span><strong>{inr(order.delivery_charge || 0)}</strong></div>
           <div><span>Current Paid</span><strong>{inr(order.paid_amount || 0)}</strong></div>
@@ -698,6 +730,10 @@ export default function AdminPage() {
   const [orderEditLoading, setOrderEditLoading] = useState(false);
   const [orderEditSaving, setOrderEditSaving] = useState(false);
   const [orderEditMenu, setOrderEditMenu] = useState({ categories: [], items: [], option_groups: [] });
+  const orderDetailsLoadRef = useRef(0);
+  const orderEditLoadRef = useRef(0);
+  const productDeleteDialogRef = useDialogFocus(Boolean(productDeleteCandidate), () => setProductDeleteCandidate(null));
+  const orderEditLoadingDialogRef = useDialogFocus(orderEditLoading, closeOrderEdit);
   const [deliveryBoys, setDeliveryBoys] = useState([]);
   const [deliveryBoyForm, setDeliveryBoyForm] = useState({ name: '', phone: '', email: '', password: '', is_active: '1' });
   const [editingDeliveryBoy, setEditingDeliveryBoy] = useState(null);
@@ -725,8 +761,14 @@ export default function AdminPage() {
   });
   const [mapsKey, setMapsKey] = useState('');
   const [theme, setTheme] = useState({});
-  const [message, setMessage] = useState('');
+  const [brandingUploading, setBrandingUploading] = useState(false);
+  const brandingUploadRef = useRef(false);
+  const [message, setMessage, messageTone] = useToastMessage();
   const [loading, setLoading] = useState(false);
+  const [tabLoading, setTabLoading] = useState(true);
+  const [tabError, setTabError] = useState('');
+  const [loadedTab, setLoadedTab] = useState('');
+  const activeLoadRef = useRef(null);
   const [mobileNav, setMobileNav] = useState(false);
   const [newOrderAlert, setNewOrderAlert] = useState(null);
   const [alertQueue, setAlertQueue] = useState([]);
@@ -783,8 +825,22 @@ export default function AdminPage() {
   }, [notificationSoundPreview]);
 
   useEffect(() => {
+    const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const stopVibration = () => {
+      if (!preference.matches) return;
+      if (vibratingRef.current) clearInterval(vibratingRef.current);
+      vibratingRef.current = null;
+      if ('vibrate' in navigator) navigator.vibrate(0);
+    };
+    preference.addEventListener('change', stopVibration);
+    return () => preference.removeEventListener('change', stopVibration);
+  }, []);
+
+  useEffect(() => {
     if (admin) loadActive();
   }, [active, admin]);
+
+  useEffect(() => () => activeLoadRef.current?.abort(), []);
 
   useEffect(() => {
     if (!admin || active !== 'products') return undefined;
@@ -816,7 +872,7 @@ export default function AdminPage() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [admin, active, productSearch]);
+  }, [admin, active, productSearch, setMessage]);
 
   useEffect(() => {
     if (!admin) return;
@@ -842,7 +898,7 @@ export default function AdminPage() {
       setToken(data.token, 'admin');
       setAdmin(data.user);
       api('/store/status').then(statusData => setStoreAvailability(statusData.store || null)).catch(() => {});
-      setMessage('Welcome back.');
+      setMessage('Welcome back.', 'success');
     } catch (err) {
       setMessage(err.message);
     } finally {
@@ -851,24 +907,33 @@ export default function AdminPage() {
   }
 
   async function logout() {
+    activeLoadRef.current?.abort();
     stopAlertEffects();
     await adminLogout().catch(() => clearToken('admin'));
     setAdmin(null);
     setStats(null);
+    setLoadedTab('');
+    setTabError('');
     setMessage('');
     setOrderAlertQueue([]);
   }
 
   async function loadActive() {
+    activeLoadRef.current?.abort();
+    const controller = new AbortController();
+    activeLoadRef.current = controller;
+    const loadRequest = path => adminRequest(path, { signal: controller.signal });
+    setTabLoading(true);
+    setTabError('');
     try {
-      if (active === 'dashboard') setStats((await adminRequest('/admin/dashboard')).stats);
+      if (active === 'dashboard') setStats((await loadRequest('/admin/dashboard')).stats);
       else if (resources[active]) {
-        const data = await adminRequest(`/admin/${active}`);
+        const data = await loadRequest(`/admin/${active}`);
         setItems(data.items || []);
-        if (['products', 'offers', 'promotional-banners', 'promotional-popups'].includes(active)) {
+        if (['products', 'toppings', 'offers', 'promotional-banners', 'promotional-popups'].includes(active)) {
           const [productsData, categoriesData] = await Promise.all([
-            active === 'products' ? Promise.resolve(data) : adminRequest('/admin/products'),
-            adminRequest('/admin/categories')
+            active === 'products' ? Promise.resolve(data) : loadRequest('/admin/products'),
+            loadRequest('/admin/categories')
           ]);
           setCatalogProducts(productsData.items || []);
           setCatalogCategories(categoriesData.items || []);
@@ -877,49 +942,49 @@ export default function AdminPage() {
       else if (active === 'orders') {
         const historyParams = new URLSearchParams(Object.fromEntries(Object.entries(orderFilters).filter(([, value]) => value)));
         const [todayData, ordersData, boysData] = await Promise.all([
-          adminRequest('/admin/orders?scope=today'),
-          adminRequest(`/admin/orders${historyParams.toString() ? `?${historyParams}` : ''}`),
-          adminRequest('/admin/delivery-boys')
+          loadRequest('/admin/orders?scope=today'),
+          loadRequest(`/admin/orders${historyParams.toString() ? `?${historyParams}` : ''}`),
+          loadRequest('/admin/delivery-boys')
         ]);
         setTodayOrders(todayData.orders || []);
         setOrders(ordersData.orders || []);
         setDeliveryBoys(boysData.delivery_boys || []);
       }
-      else if (active === 'delivery-boys') setDeliveryBoys((await adminRequest('/admin/delivery-boys')).delivery_boys || []);
+      else if (active === 'delivery-boys') setDeliveryBoys((await loadRequest('/admin/delivery-boys')).delivery_boys || []);
       else if (active === 'customers') {
         const params = new URLSearchParams(Object.fromEntries(Object.entries(customerFilters).filter(([, value]) => value)));
-        setCustomers((await adminRequest(`/admin/customers${params.toString() ? `?${params}` : ''}`)).customers || []);
+        setCustomers((await loadRequest(`/admin/customers${params.toString() ? `?${params}` : ''}`)).customers || []);
       }
-      else if (active === 'staff') setStaff((await adminRequest('/admin/staff')).staff || []);
-      else if (active === 'staff-performance') setStaffPerformance((await adminRequest('/admin/staff-performance')).staff_performance || []);
+      else if (active === 'staff') setStaff((await loadRequest('/admin/staff')).staff || []);
+      else if (active === 'staff-performance') setStaffPerformance((await loadRequest('/admin/staff-performance')).staff_performance || []);
       else if (active === 'reports-sales') {
-        const [reportData, staffData] = await Promise.all([adminRequest(`/admin/reports/sales?${new URLSearchParams(reportFilters)}`), adminRequest('/admin/staff')]);
+        const [reportData, staffData] = await Promise.all([loadRequest(`/admin/reports/sales?${new URLSearchParams(reportFilters)}`), loadRequest('/admin/staff')]);
         setSalesReport(reportData.report);
         setStaff(staffData.staff || []);
       }
-      else if (active === 'payments') setPayments((await adminRequest('/admin/payments')).payments);
+      else if (active === 'payments') setPayments((await loadRequest('/admin/payments')).payments);
       else if (active === 'notifications') {
         const [notificationsData, settingsData] = await Promise.all([
-          adminRequest('/admin/notifications'),
-          adminRequest('/admin/settings')
+          loadRequest('/admin/notifications'),
+          loadRequest('/admin/settings')
         ]);
         setNotifications(notificationsData.notifications || []);
         setSettings(settingsData.settings || {});
       }
-      else if (active === 'settings' || active === 'feature-controls') setSettings((await adminRequest('/admin/settings')).settings);
+      else if (active === 'settings' || active === 'feature-controls') setSettings((await loadRequest('/admin/settings')).settings);
       else if (active === 'order-availability') {
-        const [data, settingsData] = await Promise.all([adminRequest('/admin/settings/order-availability'), adminRequest('/admin/settings')]);
+        const [data, settingsData] = await Promise.all([loadRequest('/admin/settings/order-availability'), loadRequest('/admin/settings')]);
         setStoreAvailability(data.availability);
         setOrderSchedule(data.schedule || {});
         setSettings(settingsData.settings || {});
       }
       else if (active === 'appearance') {
-        const data = await adminRequest('/admin/settings');
+        const data = await loadRequest('/admin/settings');
         setCustomerDefaultTheme(data.settings?.customer_default_theme || 'system');
         setAdminThemeMode(storedThemeMode('pizza_house_admin_theme_mode') || data.settings?.admin_theme_mode || 'system');
       }
       else if (active === 'integrations') {
-        const data = await adminRequest('/admin/settings/integrations');
+        const data = await loadRequest('/admin/settings/integrations');
         setIntegrations(data.integrations);
         setIntegrationDraft({
           razorpay: {
@@ -935,12 +1000,17 @@ export default function AdminPage() {
         });
       }
       else if (active === 'theme') {
-        const data = await adminRequest('/admin/theme');
+        const data = await loadRequest('/admin/theme');
         setTheme(data.theme);
         applyTheme(data.theme, adminThemeMode, 'pizza_house_admin_theme_mode');
       }
     } catch (err) {
-      setMessage(err.message);
+      if (err.name !== 'AbortError' && activeLoadRef.current === controller) setTabError(safeNoticeMessage(err.message));
+    } finally {
+      if (activeLoadRef.current === controller) {
+        setLoadedTab(active);
+        setTabLoading(false);
+      }
     }
   }
 
@@ -1079,7 +1149,7 @@ export default function AdminPage() {
     } else {
       setSoundBlocked(false);
     }
-    if ('vibrate' in navigator) {
+    if ('vibrate' in navigator && !reducedMotionPreferred()) {
       navigator.vibrate([700, 180, 700]);
       vibratingRef.current = setInterval(() => navigator.vibrate([700, 180, 700]), 2600);
     }
@@ -1146,7 +1216,7 @@ export default function AdminPage() {
       clearProductImageSelection();
       setEditing(null);
       setNewVariantName('');
-      setMessage('Saved successfully.');
+      setMessage('Saved successfully.', 'success');
       loadActive();
     } catch (err) {
       setMessage(err.message);
@@ -1176,11 +1246,15 @@ export default function AdminPage() {
       next.buy_product_id = item.buy_product_id || (item.scope === 'item' ? item.scope_id : '');
       next.free_product_id = item.free_product_id || (item.scope === 'item' ? item.scope_id : '');
     }
+    if (active === 'toppings') {
+      next.category_ids = idList(item.category_ids);
+      next.product_ids = idList(item.product_ids);
+    }
     setForm(next);
     setNewVariantName('');
     clearProductImageSelection();
     setEditing(item.id);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0, behavior: scrollBehavior() });
   }
 
   function clearProductImageSelection() {
@@ -1247,7 +1321,7 @@ export default function AdminPage() {
     if (!productDeleteCandidate) return;
     try {
       const response = await adminRequest(`/admin/products/${productDeleteCandidate.id}`, { method: 'DELETE' });
-      setMessage(response.archived_due_to_history ? `${productDeleteCandidate.name} has order history, so it was archived instead of permanently deleted.` : `${productDeleteCandidate.name} permanently deleted.`);
+      setMessage(response.archived_due_to_history ? `${productDeleteCandidate.name} has order history, so it was archived instead of permanently deleted.` : `${productDeleteCandidate.name} permanently deleted.`, response.archived_due_to_history ? 'info' : 'success');
       setProductDeleteCandidate(null);
       setEditing(null);
       setForm({});
@@ -1261,7 +1335,7 @@ export default function AdminPage() {
   async function restoreProduct(product) {
     try {
       await adminRequest(`/admin/products/${product.id}`, { method: 'PUT', body: JSON.stringify({ is_active: 1 }) });
-      setMessage(`${product.name} restored.`);
+      setMessage(`${product.name} restored.`, 'success');
       loadActive();
     } catch (err) {
       setMessage(err.message);
@@ -1276,10 +1350,22 @@ export default function AdminPage() {
         return;
       }
     }
+    if (['toppings', 'staff-delivery-slabs'].includes(active) && !window.confirm('Remove this entry from future selections? Existing order prices and invoices will be preserved.')) return;
     try {
       const id = typeof itemOrId === 'object' ? itemOrId.id : itemOrId;
       await adminRequest(`/admin/${active}/${id}`, { method: 'DELETE' });
-      setMessage('Deleted.');
+      setMessage(['toppings', 'staff-delivery-slabs'].includes(active) ? 'Removed from future selections. Existing orders are preserved.' : 'Deleted.', 'success');
+      loadActive();
+    } catch (err) {
+      setMessage(err.message);
+    }
+  }
+
+  async function toggleManagedAvailability(item) {
+    try {
+      const nextActive = Number(item.is_active) === 1 ? 0 : 1;
+      await adminRequest(`/admin/${active}/${item.id}`, { method: 'PUT', body: JSON.stringify({ is_active: nextActive }) });
+      setMessage(nextActive ? 'Available for future orders.' : 'Unavailable for future orders. Existing orders are preserved.', 'success');
       loadActive();
     } catch (err) {
       setMessage(err.message);
@@ -1289,7 +1375,7 @@ export default function AdminPage() {
   async function updateOrder(order, patch) {
     try {
       await adminRequest(`/admin/orders/${order.id}`, { method: 'PUT', body: JSON.stringify(patch) });
-      setMessage('Order updated.');
+      setMessage('Order updated.', 'success');
       if (patch.status === 'cancelled') {
         setOrderAlertQueue(current => current.filter(alertOrder => Number(alertOrder.id) !== Number(order.id)));
         if (Number(newOrderAlert?.id) === Number(order.id)) {
@@ -1307,7 +1393,7 @@ export default function AdminPage() {
     if (!window.confirm(`PERMANENTLY DELETE ORDER?\n\n${order.order_number}\n\nThis action cannot be undone.`)) return;
     try {
       await adminRequest(`/admin/orders/${order.id}`, { method: 'DELETE' });
-      setMessage(`${order.order_number} permanently deleted.`);
+      setMessage(`${order.order_number} permanently deleted.`, 'success');
       setOrders(current => current.filter(row => Number(row.id) !== Number(order.id)));
       setTodayOrders(current => current.filter(row => Number(row.id) !== Number(order.id)));
       setOrderAlertQueue(current => current.filter(alertOrder => Number(alertOrder.id) !== Number(order.id)));
@@ -1335,7 +1421,7 @@ export default function AdminPage() {
       }
       setDeliveryBoyForm({ name: '', phone: '', email: '', password: '', is_active: '1' });
       setEditingDeliveryBoy(null);
-      setMessage('Delivery boy saved.');
+      setMessage('Delivery boy saved.', 'success');
       setDeliveryBoys((await adminRequest('/admin/delivery-boys')).delivery_boys || []);
     } catch (err) {
       setMessage(err.message);
@@ -1345,7 +1431,7 @@ export default function AdminPage() {
   function editDeliveryBoy(boy) {
     setEditingDeliveryBoy(boy.id);
     setDeliveryBoyForm({ name: boy.name || '', phone: boy.phone || '', email: boy.email || '', password: '', is_active: String(boy.is_active ?? '1') });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0, behavior: scrollBehavior() });
   }
 
   async function saveStaff() {
@@ -1358,7 +1444,7 @@ export default function AdminPage() {
       }
       setStaffForm({ name: '', phone: '', email: '', password: '', is_active: '1', permissions: defaultStaffPermissions });
       setEditingStaff(null);
-      setMessage('Staff account saved.');
+      setMessage('Staff account saved.', 'success');
       setStaff((await adminRequest('/admin/staff')).staff || []);
     } catch (err) {
       setMessage(err.message);
@@ -1375,7 +1461,7 @@ export default function AdminPage() {
       priority: '100',
       is_active: '1'
     });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0, behavior: scrollBehavior() });
   }
 
   async function toggleDeliverySlab(item, activeValue) {
@@ -1391,7 +1477,7 @@ export default function AdminPage() {
           is_active: activeValue ? 1 : 0
         })
       });
-      setMessage(activeValue ? 'Delivery slab enabled.' : 'Delivery slab disabled.');
+      setMessage(activeValue ? 'Delivery slab enabled.' : 'Delivery slab disabled.', 'success');
       loadActive();
     } catch (err) {
       setMessage(err.message);
@@ -1410,11 +1496,11 @@ export default function AdminPage() {
   function editStaffMember(member) {
     setEditingStaff(member.id);
     setStaffForm({ name: member.name || '', phone: member.phone || '', email: member.email || '', password: '', is_active: String(member.is_active ?? '1'), permissions: { ...defaultStaffPermissions, ...(member.permissions || {}) } });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0, behavior: scrollBehavior() });
   }
 
   function updateStaffPermission(key, allowed) {
-    setStaffForm(current => ({ ...current, permissions: { ...defaultStaffPermissions, ...(current.permissions || {}), [key]: allowed } }));
+    setStaffForm(current => ({ ...current, permissions: { ...defaultStaffPermissions, ...(current.permissions || {}), [key]: allowed, ...(key === 'apply_free_pizza' && !allowed ? { free_pizza_cross_category: false } : {}) } }));
   }
 
   async function openAcceptOrder(order) {
@@ -1445,23 +1531,32 @@ export default function AdminPage() {
 
   function viewAlertOrder(order) {
     setActive('orders');
-    setTimeout(() => document.getElementById(`admin-order-${order.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+    setTimeout(() => document.getElementById(`admin-order-${order.id}`)?.scrollIntoView({ behavior: scrollBehavior(), block: 'center' }), 100);
   }
 
   async function openOrderDetails(order) {
+    const request = ++orderDetailsLoadRef.current;
     setOrderDetailsLoading(true);
     setActive('orders');
     try {
       const data = await adminRequest(`/admin/orders/${order.id}/tracking`);
+      if (request !== orderDetailsLoadRef.current) return;
       setOrderDetails(data);
     } catch (err) {
-      setMessage(err.message);
+      if (request === orderDetailsLoadRef.current) setMessage(err.message);
     } finally {
-      setOrderDetailsLoading(false);
+      if (request === orderDetailsLoadRef.current) setOrderDetailsLoading(false);
     }
   }
 
+  function closeOrderDetails() {
+    ++orderDetailsLoadRef.current;
+    setOrderDetails(null);
+    setOrderDetailsLoading(false);
+  }
+
   async function openOrderEdit(order) {
+    const request = ++orderEditLoadRef.current;
     setOrderEditLoading(true);
     setActive('orders');
     try {
@@ -1469,14 +1564,21 @@ export default function AdminPage() {
         adminRequest(`/admin/orders/${order.id}/edit`),
         api('/menu')
       ]);
+      if (request !== orderEditLoadRef.current) return;
       setOrderEdit(details);
       setOrderEditMenu(menu);
       setOrderDetails(null);
     } catch (err) {
-      setMessage(err.message);
+      if (request === orderEditLoadRef.current) setMessage(err.message);
     } finally {
-      setOrderEditLoading(false);
+      if (request === orderEditLoadRef.current) setOrderEditLoading(false);
     }
+  }
+
+  function closeOrderEdit() {
+    ++orderEditLoadRef.current;
+    setOrderEdit(null);
+    setOrderEditLoading(false);
   }
 
   async function saveOrderEdit(lines) {
@@ -1484,20 +1586,12 @@ export default function AdminPage() {
     setOrderEditSaving(true);
     try {
       const payload = {
-        items: lines.map(line => ({
-          id: line.id,
-          variant_id: line.variant_id || null,
-          option_ids: line.option_ids || [],
-          quantity: line.quantity,
-          client_key: line.rowKey,
-          is_bogo_free: Boolean(line.is_bogo_free),
-          bogo_parent_key: line.bogo_parent_key || ''
-        }))
+        items: lines.map(orderLinePayload)
       };
       const data = await adminRequest(`/admin/orders/${orderEdit.order.id}/edit`, { method: 'PUT', body: JSON.stringify(payload) });
       setOrderEdit(null);
       setOrderDetails(data);
-      setMessage('Order updated and totals recalculated.');
+      setMessage('Order updated and totals recalculated.', 'success');
       loadActive();
     } catch (err) {
       setMessage(err.message);
@@ -1519,7 +1613,7 @@ export default function AdminPage() {
   async function emailAdminInvoice(order) {
     try {
       const data = await adminRequest(`/admin/orders/${order.id}/email-invoice`, { method: 'POST', body: JSON.stringify({}) });
-      setMessage(data.email?.ok ? 'Invoice email sent.' : `Invoice email ${data.email?.status || 'failed'}: ${data.email?.error || 'Check email settings.'}`);
+      setMessage(data.email?.ok ? 'Invoice email accepted for delivery.' : 'The invoice email could not be sent. Check email settings and try again.', data.email?.ok ? 'info' : 'error');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1529,7 +1623,7 @@ export default function AdminPage() {
     try {
       const data = await adminRequest('/admin/settings', { method: 'PUT', body: JSON.stringify(settings) });
       setSettings(data.settings);
-      setMessage('Settings saved.');
+      setMessage('Settings saved.', 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1564,7 +1658,7 @@ export default function AdminPage() {
       setNotificationSoundFile(null);
       setNotificationSoundPreview('');
       setNotificationSoundError('');
-      setMessage('New order notification sound settings saved.');
+      setMessage('New order notification sound settings saved.', 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1625,7 +1719,7 @@ export default function AdminPage() {
       const data = await adminRequest('/admin/notification-sound', { method: 'DELETE' });
       clearSelectedNotificationSound();
       setSettings(data.settings);
-      setMessage('Custom notification sound removed. Built-in sound is active.');
+      setMessage('Custom notification sound removed. Built-in sound is active.', 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1646,7 +1740,7 @@ export default function AdminPage() {
       const data = await adminRequest('/admin/settings/order-availability/master', { method: 'PUT', body: JSON.stringify({ manual_override: manualOverride }) });
       setStoreAvailability(data.availability);
       setSettings(current => ({ ...current, order_manual_override: manualOverride, accept_orders: manualOverride === 'closed' ? '0' : '1', force_close_orders: manualOverride === 'closed' ? '1' : '0' }));
-      setMessage(manualOverride === 'open' ? 'Orders are open now.' : manualOverride === 'closed' ? 'Orders are closed now.' : 'Orders now follow the daily schedule.');
+      setMessage(manualOverride === 'open' ? 'Orders are open now.' : manualOverride === 'closed' ? 'Orders are closed now.' : 'Orders now follow the daily schedule.', 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1656,7 +1750,7 @@ export default function AdminPage() {
     try {
       const data = await adminRequest(`/admin/reports/sales?${new URLSearchParams(reportFilters)}`);
       setSalesReport(data.report);
-      setMessage('Sales report loaded.');
+      setMessage('Sales report loaded.', 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1700,7 +1794,7 @@ export default function AdminPage() {
       const data = await adminRequest('/admin/settings/order-availability', { method: 'PUT', body: JSON.stringify({ schedule: orderSchedule }) });
       setStoreAvailability(data.availability);
       setOrderSchedule(data.schedule || {});
-      setMessage('Order availability schedule saved.');
+      setMessage('Order availability schedule saved.', 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1713,7 +1807,7 @@ export default function AdminPage() {
       setSettings(data.settings);
       const statusData = await api('/store/status');
       setStoreAvailability(statusData.store || null);
-      setMessage('Feature controls saved.');
+      setMessage('Feature controls saved.', 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1724,7 +1818,7 @@ export default function AdminPage() {
       const data = await adminRequest('/admin/settings', { method: 'PUT', body: JSON.stringify({ customer_default_theme: customerDefaultTheme, admin_theme_mode: adminThemeMode }) });
       setCustomerDefaultTheme(data.settings?.customer_default_theme || customerDefaultTheme);
       setThemeMode(adminThemeMode, 'pizza_house_admin_theme_mode');
-      setMessage('Appearance settings saved.');
+      setMessage('Appearance settings saved.', 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1736,7 +1830,7 @@ export default function AdminPage() {
     try {
       const data = await adminRequest('/admin/settings', { method: 'PUT', body: JSON.stringify({ customer_default_theme: 'system', admin_theme_mode: 'system' }) });
       setCustomerDefaultTheme(data.settings?.customer_default_theme || 'system');
-      setMessage('Appearance settings reset.');
+      setMessage('Appearance settings reset.', 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1777,7 +1871,7 @@ export default function AdminPage() {
       });
       const publicSettings = await api('/settings');
       setMapsKey(publicSettings.google_maps_api_key || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '');
-      setMessage(`${section === 'razorpay' ? 'Razorpay' : 'Google Maps'} settings saved.`);
+      setMessage(`${section === 'razorpay' ? 'Razorpay' : 'Google Maps'} settings saved.`, 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1787,18 +1881,40 @@ export default function AdminPage() {
     try {
       const endpoint = section === 'razorpay' ? '/admin/settings/integrations/razorpay/test' : '/admin/settings/integrations/google-maps/test';
       const data = await adminRequest(endpoint, { method: 'POST', body: JSON.stringify({}) });
-      setMessage(data.test?.ok ? `${section === 'razorpay' ? 'Razorpay' : 'Google Maps'} configuration test passed.` : `Configuration test failed: ${data.test?.message || 'Unknown error'}`);
+      setMessage(data.test?.ok ? `${section === 'razorpay' ? 'Razorpay' : 'Google Maps'} configuration test passed.` : `Configuration test failed: ${data.test?.message || 'Check the integration settings and try again.'}`, data.test?.ok ? 'success' : 'error');
     } catch (err) {
       setMessage(err.message);
     }
   }
 
+  async function uploadBrandImage(key, file) {
+    if (!file || brandingUploadRef.current) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024 || !file.size) {
+      setMessage('Choose a JPG, PNG or WEBP image up to 5MB.'); return;
+    }
+    if (key === 'favicon_url' && file.type !== 'image/png') {
+      setMessage('Choose a PNG favicon, preferably a square image.'); return;
+    }
+    brandingUploadRef.current = true;
+    setBrandingUploading(true);
+    try {
+      const body = new FormData();
+      body.append('image', file);
+      body.append('name', key === 'favicon_url' ? 'website-favicon' : 'website-logo');
+      const uploaded = await adminUploadRequest('/admin/product-image', body);
+      setTheme(current => ({ ...current, [key]: uploaded.image_url }));
+      setMessage('Image uploaded. Click Save Changes to publish it on the website.', 'success');
+    } catch (error) { setMessage(error.message); }
+    finally { brandingUploadRef.current = false; setBrandingUploading(false); }
+  }
+
   async function saveTheme() {
+    if (brandingUploadRef.current) return;
     try {
       const data = await adminRequest('/admin/theme', { method: 'PUT', body: JSON.stringify(theme) });
       setTheme(data.theme);
       applyTheme(data.theme, adminThemeMode, 'pizza_house_admin_theme_mode');
-      setMessage('Theme saved.');
+      setMessage('Theme saved.', 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1809,7 +1925,7 @@ export default function AdminPage() {
       const data = await adminRequest('/admin/theme', { method: 'DELETE' });
       setTheme(data.theme);
       applyTheme(data.theme, adminThemeMode, 'pizza_house_admin_theme_mode');
-      setMessage('Theme reset to defaults.');
+      setMessage('Theme reset to defaults.', 'success');
     } catch (err) {
       setMessage(err.message);
     }
@@ -1822,6 +1938,11 @@ export default function AdminPage() {
   }
 
   function adminField(field, value, onChange) {
+    if (['toppings', 'staff-delivery-slabs'].includes(active) && field === 'is_active') return <select value={String(value ?? '1')} onChange={e => onChange(e.target.value)}><option value="1">Active / available</option><option value="0">Inactive / unavailable</option></select>;
+    if (active === 'toppings' && field === 'group_name') return <select value={value || 'Pizza Topping'} onChange={e => onChange(e.target.value)}><option value="Pizza Topping">Pizza Topping</option><option value="Add-On">Add-On</option></select>;
+    if (active === 'toppings' && field === 'applies_to') return <select value={value || 'pizza'} onChange={e => onChange(e.target.value)}><option value="pizza">Pizzas only</option><option value="all">All products</option></select>;
+    if (active === 'toppings' && field.endsWith('_price')) return <input type="number" min="0" max="99999999.99" step="0.01" value={value ?? ''} placeholder={field === 'fixed_price' ? 'Enter a base price or size prices' : 'Use base price when blank'} onChange={e => onChange(e.target.value)} />;
+    if (active === 'staff-delivery-slabs' && ['min_order_amount', 'max_order_amount', 'charge', 'priority'].includes(field)) return <input type="number" min="0" max="99999999.99" step={field === 'priority' ? '1' : '0.01'} value={value ?? ''} placeholder={field === 'max_order_amount' ? 'No upper limit' : field === 'charge' ? 'Required; enter 0 for free delivery' : ''} onChange={e => onChange(e.target.value)} />;
     if (field === 'destination_type' && ['promotional-banners', 'promotional-popups'].includes(active)) {
       return (
         <select value={value || 'none'} onChange={e => setForm({ ...form, destination_type: e.target.value, destination_value: '' })}>
@@ -1857,7 +1978,7 @@ export default function AdminPage() {
     }
     const options = fieldOptions[field];
     if (options) {
-      return <select value={value || ''} onChange={e => onChange(e.target.value)}><option value="">Select</option>{options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}</select>;
+      return <select value={String(value ?? '')} onChange={e => onChange(e.target.value)}><option value="">Select</option>{options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}</select>;
     }
     if (field === 'category_ids') return <CheckboxMultiSelect options={catalogCategories} value={value || []} onChange={onChange} />;
     if (field === 'product_ids') return <CheckboxMultiSelect options={catalogProducts} value={value || []} onChange={onChange} />;
@@ -1958,6 +2079,38 @@ export default function AdminPage() {
       payload.is_active = String(payload.is_active ?? '1') === '1' ? 1 : 0;
       payload.priority = payload.priority || '100';
     }
+    if (active === 'staff-delivery-slabs') {
+      payload.name = String(payload.name || '').trim();
+      if (!payload.name || payload.name.length > 120) throw new Error('Enter a Staff delivery charge name of up to 120 characters.');
+      payload.min_order_amount = payload.min_order_amount === '' || payload.min_order_amount == null ? 0 : Number(payload.min_order_amount);
+      payload.max_order_amount = payload.max_order_amount === '' || payload.max_order_amount == null ? null : Number(payload.max_order_amount);
+      if (payload.charge === '' || payload.charge == null) throw new Error('Enter the configured Staff delivery charge. Use 0 only when delivery is free.');
+      payload.charge = Number(payload.charge);
+      if ([payload.min_order_amount, payload.charge, ...(payload.max_order_amount == null ? [] : [payload.max_order_amount])].some(value => !Number.isFinite(value) || value < 0 || value > 99999999.99)) throw new Error('Use valid non-negative amounts for Staff delivery charges.');
+      if (payload.max_order_amount != null && payload.max_order_amount < payload.min_order_amount) throw new Error('Maximum order amount must be at least the minimum order amount.');
+      payload.priority = payload.priority === '' || payload.priority == null ? 100 : Number(payload.priority);
+      if (!Number.isInteger(payload.priority) || payload.priority < 0 || payload.priority > 999999) throw new Error('Priority must be a whole number between 0 and 999999.');
+      payload.is_active = String(payload.is_active ?? '1') === '1' ? 1 : 0;
+    }
+    if (active === 'toppings') {
+      payload.name = String(payload.name || '').trim();
+      if (!payload.name || payload.name.length > 120) throw new Error('Enter a topping or add-on name of up to 120 characters.');
+      payload.group_name = payload.group_name || 'Pizza Topping';
+      payload.applies_to = payload.applies_to || 'pizza';
+      let hasPrice = false;
+      for (const field of ['fixed_price', 'small_price', 'medium_price', 'large_price']) {
+        if (payload[field] === '' || payload[field] == null) { payload[field] = null; continue; }
+        const price = Number(payload[field]);
+        if (!Number.isFinite(price) || price < 0 || price > 99999999.99) throw new Error('Enter valid non-negative topping and add-on prices.');
+        payload[field] = price;
+        hasPrice = true;
+      }
+      if (!hasPrice) throw new Error('Enter a base price or at least one size price. Use 0 only when this option is free.');
+      if (payload.fixed_price == null && (payload.applies_to === 'all' || ['small_price', 'medium_price', 'large_price'].some(field => payload[field] == null))) throw new Error('Set a base price, or provide all three pizza size prices for a pizza-only option.');
+      payload.category_ids = JSON.stringify(idList(payload.category_ids));
+      payload.product_ids = JSON.stringify(idList(payload.product_ids));
+      payload.is_active = String(payload.is_active ?? '1') === '1' ? 1 : 0;
+    }
     if (['promotional-banners', 'promotional-popups'].includes(active)) {
       payload.destination_type = payload.destination_type || 'none';
       if (['none', 'menu'].includes(payload.destination_type)) {
@@ -2036,7 +2189,7 @@ export default function AdminPage() {
             <h1>Sign in to manage orders</h1>
             <p>Use your admin account to manage menu items, offers, payments, delivery slabs, and the theme customizer.</p>
           </div>
-          {message ? <p className="notice error">{message}</p> : null}
+          {message ? <Toast tone={messageTone} onDismiss={() => setMessage('')}>{message}</Toast> : null}
           <input placeholder="Admin email" value={login.email} onChange={e => setLogin({ ...login, email: e.target.value })} />
           <input type="password" placeholder="Password" value={login.password} onChange={e => setLogin({ ...login, password: e.target.value })} />
           <button onClick={adminLogin} disabled={loading}>{loading ? 'Signing in...' : 'Sign in'}</button>
@@ -2072,7 +2225,7 @@ export default function AdminPage() {
         />
       ) : null}
       {productDeleteCandidate ? (
-        <div className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true">
+        <div ref={productDeleteDialogRef} tabIndex={-1} className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true" aria-label="Delete product confirmation">
           <section className="admin-order-modal product-delete-modal">
             <div className="modal-icon danger"><Trash2 size={24} /></div>
             <div>
@@ -2091,7 +2244,7 @@ export default function AdminPage() {
         <OrderDetailsModal
           data={orderDetails}
           loading={orderDetailsLoading}
-          onClose={() => { setOrderDetails(null); setOrderDetailsLoading(false); }}
+          onClose={closeOrderDetails}
           onEditOrder={openOrderEdit}
           onViewInvoice={order => viewAdminInvoice(order, false)}
           onDownloadInvoice={order => viewAdminInvoice(order, true)}
@@ -2100,13 +2253,13 @@ export default function AdminPage() {
       ) : null}
       {(orderEdit || orderEditLoading) ? (
         orderEditLoading ? (
-          <div className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true"><section className="admin-order-modal order-edit-modal"><div className="empty-state">Loading order editor...</div></section></div>
+          <div ref={orderEditLoadingDialogRef} tabIndex={-1} className="admin-modal-backdrop accept-order-backdrop" role="dialog" aria-modal="true" aria-label="Loading order editor"><section className="admin-order-modal order-edit-modal"><button type="button" className="icon-button modal-close" onClick={closeOrderEdit} aria-label="Cancel loading order editor"><X size={18} aria-hidden="true" /></button><LoadingState label="Loading order editor…" rows={6} /></section></div>
         ) : (
           <OrderEditModal
             data={orderEdit}
             menu={orderEditMenu}
             saving={orderEditSaving}
-            onClose={() => { setOrderEdit(null); setOrderEditLoading(false); }}
+            onClose={closeOrderEdit}
             onSave={saveOrderEdit}
           />
         )
@@ -2152,7 +2305,11 @@ export default function AdminPage() {
             <div className="admin-profile">{admin.name?.[0] || 'A'}<span>{admin.email}</span></div>
           </div>
         </header>
-        {message ? <p className="notice success">{message}</p> : null}
+        {message ? <Toast tone={messageTone} onDismiss={() => setMessage('')}>{message}</Toast> : null}
+
+        {tabError ? <ErrorState title={`${activeLabel} could not be loaded`} message={tabError} onRetry={loadActive} retrying={tabLoading} /> : null}
+        {tabLoading || loadedTab !== active ? <LoadingState label={`Loading ${activeLabel.toLowerCase()}…`} cards={active === 'dashboard' ? 3 : 1} rows={5} /> : null}
+        <div hidden={tabLoading || loadedTab !== active || Boolean(tabError)}>
 
         {active === 'dashboard' && (
           <div>
@@ -2175,7 +2332,7 @@ export default function AdminPage() {
         {resources[active] && active !== 'delivery-slabs' && (
           <div className={active === 'products' ? 'admin-content-grid products-management-grid' : 'admin-content-grid'}>
             <section className="panel">
-              <div className="panel-heading"><h2>{editing ? 'Edit' : active === 'products' ? '+ Add Product' : active === 'offers' ? '+ Create Offer' : 'Add'} {active === 'products' || active === 'offers' ? '' : active.replace('-', ' ')}</h2><p>Changes save through the existing PHP admin API.</p></div>
+              <div className="panel-heading"><h2>{editing ? 'Edit' : active === 'products' ? '+ Add Product' : active === 'offers' ? '+ Create Offer' : 'Add'} {active === 'products' || active === 'offers' ? '' : activeLabel}</h2><p>{active === 'staff-delivery-slabs' ? 'Set Staff-only delivery charges by order amount. Staff select a matching active charge; customer online distance pricing is unchanged. No charge is assumed when no rule matches.' : active === 'toppings' ? 'Manage the existing menu options. New selections use current prices; placed order snapshots and invoices retain their recorded prices. Leave category and product selections empty for unrestricted availability within the product type.' : 'Changes save through the existing PHP admin API.'}</p></div>
               <div className="form-grid">
                 {resourceFields.map(field => field === 'image_url' && (active === 'products' || active === 'categories' || active === 'promotional-banners' || active === 'promotional-popups')
                   ? <ProductImageUpload key={field} label={active === 'products' ? 'Product Image' : active === 'categories' ? 'Category Image' : 'Promotion Image'} value={form.image_url || ''} file={productImageFile} preview={productImagePreview} onSelect={selectProductImage} onRemove={() => { clearProductImageSelection(); setForm({ ...form, image_url: '' }); }} />
@@ -2189,6 +2346,8 @@ export default function AdminPage() {
                           ? null
                           : <label key={field}>{adminLabel(field)}{adminField(field, form[field], value => setForm({ ...form, [field]: value }))}</label>)}
               </div>
+              {active === 'toppings' ? <p className="small-note">Blank size prices use the base price. Set a base price, or all three size prices for a pizza-only option. Options are available in any selected category or specific product; leave both empty to allow all applicable products.</p> : null}
+              {active === 'staff-delivery-slabs' ? <p className="small-note">Leave the maximum order amount blank for no upper limit. Enter the actual business charge, including 0 for a free delivery rule. Lower priority numbers are matched first when automatic selection is available.</p> : null}
               {active === 'products' ? (
                 <fieldset className="my-4 grid gap-3 rounded-lg border border-tph-border p-4">
                   <legend className="px-2 font-bold">Size Pricing</legend>
@@ -2242,7 +2401,7 @@ export default function AdminPage() {
               </div>
             </section>
             <section className="panel table-panel">
-              <div className="panel-heading"><h2>{active === 'products' ? 'Products' : active === 'offers' ? 'Offers' : active.replace('-', ' ')}</h2></div>
+              <div className="panel-heading"><h2>{activeLabel}</h2></div>
               {active === 'products' ? (
                 <>
                   <div className="admin-product-search">
@@ -2280,18 +2439,43 @@ export default function AdminPage() {
                   </div>
                   <div className="admin-product-list">
                     {items.map((item, index) => <article className={Number(item.is_active) === 1 ? 'admin-product-row' : 'admin-product-row inactive'} key={item.id}>
-                      <img className="table-thumb large" src={productImage(item, index)} alt="" />
+                      <OptimizedImage className="table-thumb large" src={productImage(item, index)} alt={item.name || 'Product'} width={480} height={320} sizes="(max-width: 520px) 80vw, 280px" />
                       <div><strong>{item.name}</strong><p>{item.description || 'No description'}</p></div>
                       <div><span>Category</span><strong>{categoryName(item.category_id)}</strong></div>
                       <div><span>Price</span><strong>{inr(productStartingPrice(item))}</strong></div>
                       <div><span>Stock</span><strong>{Number(item.stock || 0) <= Number(item.low_stock_threshold || 0) ? 'Low stock' : `${item.stock} available`}</strong></div>
                       <StatusBadge tone={Number(item.is_active) === 1 ? 'success' : 'danger'}>{Number(item.is_active) === 1 ? 'Active' : 'Inactive'}</StatusBadge>
-                      <div className="action-row"><button className="ghost" onClick={() => editResource(item)}>Edit</button><button className="ghost" onClick={() => { const copy = {}; resourceFields.forEach(field => { copy[field] = field === 'name' ? `${item.name} Copy` : item[field] ?? ''; }); copy.is_active = 1; setForm(copy); setEditing(null); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>Duplicate</button>{Number(item.is_active) === 1 ? <button className="ghost danger" onClick={() => deleteResource(item)}>Delete</button> : <button className="ghost" onClick={() => restoreProduct(item)}>Restore</button>}</div>
+                      <div className="action-row"><button className="ghost" onClick={() => editResource(item)}>Edit</button><button className="ghost" onClick={() => { const copy = {}; resourceFields.forEach(field => { copy[field] = field === 'name' ? `${item.name} Copy` : item[field] ?? ''; }); copy.is_active = 1; setForm(copy); setEditing(null); window.scrollTo({ top: 0, behavior: scrollBehavior() }); }}>Duplicate</button>{Number(item.is_active) === 1 ? <button className="ghost danger" onClick={() => deleteResource(item)}>Delete</button> : <button className="ghost" onClick={() => restoreProduct(item)}>Restore</button>}</div>
                     </article>)}
                   </div>
+                  {!items.length ? <EmptyState title="No products yet" message="Add a product using the form to make it available in your catalog." /> : null}
                 </>
+              ) : active === 'toppings' ? (
+                <div className="admin-offer-card-grid">
+                  {!items.length ? <EmptyState title="No toppings or add-ons yet" message="Add an option and its actual current price using the form." /> : null}
+                  {items.map(item => <article className="admin-offer-card" key={item.id}>
+                    <div><h3>{item.name}</h3><p>{item.group_name || 'Pizza Topping'} · {item.applies_to === 'all' ? 'All products' : 'Pizzas only'}</p></div>
+                    <StatusBadge tone={Number(item.is_active) === 1 ? 'success' : 'danger'}>{Number(item.is_active) === 1 ? 'Active / available' : 'Inactive / unavailable'}</StatusBadge>
+                    <dl className="confirmation-grid compact">
+                      <div><dt>Base</dt><dd>{item.fixed_price == null || item.fixed_price === '' ? 'Not set' : inr(item.fixed_price)}</dd></div>
+                      {[['S', 'Small', 'small_price'], ['M', 'Medium', 'medium_price'], ['L', 'Large', 'large_price']].map(([size, label, field]) => <div key={size}><dt>{label}</dt><dd>{item[field] == null || item[field] === '' ? item.fixed_price == null || item.fixed_price === '' ? 'Not set' : `${inr(item.fixed_price)} (base)` : inr(item[field])}</dd></div>)}
+                    </dl>
+                    <p className="small-note">Categories: {idList(item.category_ids).map(categoryName).join(', ') || 'All applicable categories'}</p>
+                    <p className="small-note">Products: {idList(item.product_ids).map(productName).join(', ') || 'All applicable products'}</p>
+                    <div className="action-row"><button className="ghost" onClick={() => editResource(item)}>Edit</button><button className="ghost" onClick={() => toggleManagedAvailability(item)}>{Number(item.is_active) === 1 ? 'Deactivate' : 'Activate'}</button><button className="ghost danger" onClick={() => deleteResource(item.id)}>Remove</button></div>
+                  </article>)}
+                </div>
+              ) : active === 'staff-delivery-slabs' ? (
+                <div className="table-wrap"><table>
+                  <thead><tr><th>Name</th><th>Order amount</th><th>Delivery charge</th><th>Priority</th><th>Availability</th><th>Actions</th></tr></thead>
+                  <tbody>{items.map(item => <tr key={item.id}>
+                    <td>{item.name}</td><td>{inr(item.min_order_amount)} to {item.max_order_amount == null || item.max_order_amount === '' ? 'no upper limit' : inr(item.max_order_amount)}</td><td>{inr(item.charge)}</td><td>{item.priority}</td><td><StatusBadge tone={Number(item.is_active) === 1 ? 'success' : 'danger'}>{Number(item.is_active) === 1 ? 'Active' : 'Inactive'}</StatusBadge></td>
+                    <td><div className="action-row">{active === 'products' ? <button className="ghost" onClick={() => { editResource(item); requestAnimationFrame(() => document.querySelector('.upload-field')?.scrollIntoView({ block: 'center' })); }}><Upload size={16} />{item.image_url ? 'Upload / Replace Photo' : 'Upload Missing Photo'}</button> : null}<button className="ghost" onClick={() => editResource(item)}>Edit</button><button className="ghost" onClick={() => toggleManagedAvailability(item)}>{Number(item.is_active) === 1 ? 'Deactivate' : 'Activate'}</button><button className="ghost danger" onClick={() => deleteResource(item.id)}>Remove</button></div></td>
+                  </tr>)}{!items.length ? <tr><td colSpan={6}><EmptyState title="No Staff delivery charges configured" message="Add the business-approved charges before creating new Staff delivery orders." /></td></tr> : null}</tbody>
+                </table></div>
               ) : active === 'offers' ? (
                 <div className="admin-offer-card-grid">
+                  {!items.length ? <EmptyState title="No offers yet" message="Create an offer using the form when you are ready to run a promotion." /> : null}
                   {items.map(item => {
                     const isBogo = (item.offer_type || 'bogo') === 'bogo';
                     let categoryIds = [];
@@ -2317,10 +2501,10 @@ export default function AdminPage() {
                     <thead><tr>{resourceFields.slice(0, 6).map(f => <th key={f}>{adminLabel(f)}</th>)}<th>Actions</th></tr></thead>
                     <tbody>{items.map((item, index) => (
                       <tr key={item.id}>
-                        {resourceFields.slice(0, 6).map(f => <td key={f}>{f === 'image_url' && item[f] ? <img className="table-thumb" src={productImage(item, index)} alt="" /> : String(item[f] ?? '')}</td>)}
+                        {resourceFields.slice(0, 6).map(f => <td key={f}>{f === 'image_url' && item[f] ? <OptimizedImage className="table-thumb" src={productImage(item, index)} alt={item.name || item.title || 'Catalog image'} width={54} height={54} sizes="54px" /> : String(item[f] ?? '')}</td>)}
                         <td><div className="action-row"><button className="ghost" onClick={() => editResource(item)}>Edit</button><button className="ghost danger" onClick={() => deleteResource(item.id)}>Delete</button></div></td>
                       </tr>
-                    ))}</tbody>
+                    ))}{!items.length ? <tr><td colSpan={resourceFields.slice(0, 6).length + 1}><EmptyState title="Nothing here yet" message="Create an entry using the form to get started." /></td></tr> : null}</tbody>
                   </table>
                 </div>
               )}
@@ -2337,6 +2521,8 @@ export default function AdminPage() {
               </div>
               <div className="form-grid">
                 <label>Minimum Order<input type="number" min="0" step="0.01" value={form.min_order_amount || ''} onChange={e => setForm({ ...form, min_order_amount: e.target.value })} placeholder="299" /></label>
+                <label>Distance from (KM)<input type="number" min="0" step="0.01" value={form.min_km ?? '0'} onChange={e => setForm({ ...form, min_km: e.target.value })} /></label>
+                <label>Distance to (KM)<input type="number" min="0" step="0.01" value={form.max_km ?? ''} onChange={e => setForm({ ...form, max_km: e.target.value })} /></label>
                 <label>Free Delivery Distance<input type="number" min="0" step="0.01" value={form.free_delivery_distance_km || ''} onChange={e => setForm({ ...form, free_delivery_distance_km: e.target.value, max_km: e.target.value })} placeholder="5" /></label>
                 <label>Free Delivery<select value={String(form.free_delivery_enabled ?? '1')} onChange={e => setForm({ ...form, free_delivery_enabled: e.target.value })}><option value="1">ON</option><option value="0">OFF</option></select></label>
                 <label>Optional Delivery Charge<input type="number" min="0" step="0.01" value={form.charge || ''} onChange={e => setForm({ ...form, charge: e.target.value })} placeholder="0" /></label>
@@ -2549,6 +2735,7 @@ export default function AdminPage() {
                     <ToggleSwitch
                       key={key}
                       checked={Boolean((staffForm.permissions || defaultStaffPermissions)[key])}
+                      disabled={key === 'free_pizza_cross_category' && !staffForm.permissions?.apply_free_pizza}
                       onChange={checked => updateStaffPermission(key, checked)}
                       label={label}
                       description={description}
@@ -2630,7 +2817,7 @@ export default function AdminPage() {
                 <section className="panel nested table-panel"><h3>BOGO Report</h3><div className="table-wrap"><table><thead><tr><th>Offer</th><th>Orders</th><th>Discount</th></tr></thead><tbody>{salesReport.bogo.map(row => <tr key={row.offer}><td>{row.offer}</td><td>{row.orders}</td><td>{inr(row.discount)}</td></tr>)}</tbody></table></div></section>
                 <section className="panel nested table-panel"><h3>Daily Sales Table</h3><div className="table-wrap"><table><thead><tr><th>Order ID</th><th>Date/Time</th><th>Source</th><th>Staff</th><th>Customer</th><th>Type</th><th>Payment</th><th>Subtotal</th><th>Discount</th><th>Total</th><th>Paid</th><th>Remaining</th><th>Status</th></tr></thead><tbody>{salesReport.orders.map(row => <tr key={row.id}><td>{row.order_number}</td><td>{row.created_at}</td><td>{row.source}</td><td>{row.staff_name || '-'}</td><td>{row.customer_name}</td><td>{row.order_type}</td><td>{row.payment_type}</td><td>{inr(row.subtotal)}</td><td>{inr(row.discount_amount)}</td><td>{inr(row.total_amount)}</td><td>{inr(row.paid_amount)}</td><td>{inr(row.remaining_amount)}</td><td>{row.status}</td></tr>)}</tbody></table></div></section>
               </>
-            ) : <div className="empty-state">Loading sales report...</div>}
+            ) : <LoadingState label="Loading sales report…" rows={6} />}
           </section>
         )}
 
@@ -2866,18 +3053,24 @@ export default function AdminPage() {
           <div className="theme-layout">
             <section className="panel">
               <div className="panel-heading"><h2>Theme Settings</h2><p>These values persist in MySQL and drive the frontend CSS variables.</p></div>
-              <div className="theme-control-grid">{Object.entries(themeLabels).map(([key, label]) => <label key={key}>{label}<input type={key.includes('color') || key.includes('colour') ? 'color' : 'text'} value={theme[key] || ''} onChange={e => updateTheme(key, e.target.value)} /></label>)}</div>
-              <div className="action-row"><button onClick={saveTheme}><Save size={16} /> Save Changes</button><button className="ghost" onClick={resetTheme}><RotateCcw size={16} /> Reset</button></div>
+              <fieldset disabled={brandingUploading} className="theme-control-grid"><legend>Website logo and favicon</legend>
+                <p className="small-note">Upload your logo and a square PNG favicon. Click Save Changes to publish. Removing an image restores the default branding.</p>
+                {['logo_url', 'favicon_url'].map(key => <ProductImageUpload key={key} label={key === 'logo_url' ? 'Website Logo' : 'Favicon (PNG)'} value={theme[key] || ''} onSelect={file => uploadBrandImage(key, file)} onRemove={() => setTheme(current => ({ ...current, [key]: '' }))} />)}
+                {brandingUploading ? <p role="status">Uploading image…</p> : null}
+              </fieldset>
+              <div className="theme-control-grid">{Object.entries(themeLabels).filter(([key]) => !['logo_url', 'favicon_url'].includes(key)).map(([key, label]) => <label key={key}>{label}<input type={key.includes('color') || key.includes('colour') ? 'color' : 'text'} value={theme[key] || ''} onChange={e => updateTheme(key, e.target.value)} /></label>)}</div>
+              <div className="action-row"><button disabled={brandingUploading} onClick={saveTheme}><Save size={16} /> Save Changes</button><button className="ghost" disabled={brandingUploading} onClick={resetTheme}><RotateCcw size={16} /> Reset</button></div>
             </section>
             <section className="theme-preview">
               <span className="eyebrow">Live preview</span>
               <h2>Premium pizza night</h2>
               <p>Preview typography, colors, card radius, buttons, and product styling before saving.</p>
               <button>Primary Button</button>
-              <article className="product-card compact"><img src={productImage({}, 0)} alt="" /><div className="product-body"><h3>Margherita Pizza</h3><span className="price">INR 299.00</span><p>Fresh basil, tomato, and mozzarella.</p></div></article>
+              <article className="product-card compact"><OptimizedImage src={productImage({}, 0)} alt="Pizza preview" width={480} height={320} sizes="(max-width: 600px) 80vw, 320px" /><div className="product-body"><h3>Margherita Pizza</h3><span className="price">INR 299.00</span><p>Fresh basil, tomato, and mozzarella.</p></div></article>
             </section>
           </div>
         )}
+        </div>
       </section>
     </main>
   );
@@ -2936,7 +3129,7 @@ function NotificationSoundUpload({ file, preview, value, name, error, onSelect, 
           hidden
         />
       </div>
-      {error ? <p className="notice danger">{error}</p> : null}
+      {error ? <Toast tone="error">{error}</Toast> : null}
     </div>
   );
 }
@@ -2964,10 +3157,10 @@ function ProductImageUpload({ label = 'Product Image', value, file, preview, onS
       >
         {currentPreview ? (
           <div className="image-preview-card">
-            <img src={currentPreview} alt={`${label} preview`} />
+            <OptimizedImage src={currentPreview} alt={`${label} preview`} width={640} height={480} sizes="(max-width: 600px) 80vw, 320px" />
             <div>
-              <strong>{file?.name || `Current ${label.toLowerCase()}`}</strong>
-              <p>{file ? fileSize : value}</p>
+              <strong className="image-preview-name" title={file?.name || `Current ${label.toLowerCase()}`}>{file?.name || `Current ${label.toLowerCase()}`}</strong>
+              <p>{file ? fileSize : 'Saved image'}</p>
               <div className="action-row">
                 <button type="button" className="ghost" onClick={() => inputRef.current?.click()}><Upload size={16} /> Replace Image</button>
                 <button type="button" className="ghost danger" onClick={onRemove}>Remove</button>
@@ -3001,7 +3194,7 @@ function DataTable({ rows, columns, moneyCols = [] }) {
       <div className="table-wrap">
         <table>
           <thead><tr>{columns.map(col => <th key={col}>{col.replaceAll('_', ' ')}</th>)}</tr></thead>
-          <tbody>{rows.map(row => <tr key={row.id}>{columns.map(col => <td key={col}>{moneyCols.includes(col) ? inr(row[col]) : String(row[col] ?? '')}</td>)}</tr>)}</tbody>
+          <tbody>{rows.map(row => <tr key={row.id}>{columns.map(col => <td key={col}>{moneyCols.includes(col) ? inr(row[col]) : String(row[col] ?? '')}</td>)}</tr>)}{!rows.length ? <tr><td colSpan={columns.length}><EmptyState title="No records yet" message="New activity will appear here when it is available." /></td></tr> : null}</tbody>
         </table>
       </div>
     </section>

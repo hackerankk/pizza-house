@@ -5,6 +5,9 @@ import Link from 'next/link';
 import Script from 'next/script';
 import { CheckCircle2, Loader2, LogOut, MapPin, Navigation, Truck } from 'lucide-react';
 import { api, applyTheme, clearToken, inr, setToken, token } from '../lib';
+import { EmptyState, ErrorState, LoadingState } from '../components/AsyncState';
+import { Toast, useToastMessage } from '../components/ui';
+import { reducedMotionPreferred } from '../motion';
 
 function statusLabel(status) {
   return String(status || '').replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase());
@@ -26,10 +29,17 @@ export default function DeliveryDashboardPage() {
   const [user, setUser] = useState(null);
   const [orders, setOrders] = useState([]);
   const [activeOrderId, setActiveOrderId] = useState(null);
-  const [message, setMessage] = useState('');
+  const [message, setMessage, messageTone] = useToastMessage();
   const [loading, setLoading] = useState(false);
+  const [sessionLoading, setSessionLoading] = useState(true);
+  const [sessionError, setSessionError] = useState(false);
+  const [sessionAttempt, setSessionAttempt] = useState(0);
+  const [ordersLoading, setOrdersLoading] = useState(true);
+  const [ordersError, setOrdersError] = useState('');
   const [tracking, setTracking] = useState(null);
   const [mapsKey, setMapsKey] = useState('');
+  const [mapsReady, setMapsReady] = useState(false);
+  const [mapsError, setMapsError] = useState('');
   const [directionsLoading, setDirectionsLoading] = useState(false);
   const [directionsError, setDirectionsError] = useState('');
   const [gpsState, setGpsState] = useState({
@@ -44,11 +54,14 @@ export default function DeliveryDashboardPage() {
   const permissionStatusRef = useRef(null);
   const mapRef = useRef(null);
   const markerRef = useRef(null);
+  const locationRequestRef = useRef(0);
 
   const activeOrder = useMemo(() => orders.find(order => order.id === activeOrderId) || orders.find(order => order.status === 'out_for_delivery') || orders[0], [orders, activeOrderId]);
   const hasMapsKey = Boolean(mapsKey);
 
   useEffect(() => {
+    setSessionLoading(true);
+    setSessionError(false);
     api('/theme').then(t => applyTheme(t.theme)).catch(() => {});
     api('/settings').then(data => setMapsKey(data.google_maps_api_key || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '')).catch(() => {
       setMapsKey(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '');
@@ -59,14 +72,17 @@ export default function DeliveryDashboardPage() {
       api('/auth/me', { authScope: 'delivery' }).then(data => {
         if (data.user.role === 'delivery_boy') setUser(data.user);
         else setMessage('Please sign in with a delivery boy account.');
-      }).catch(() => clearToken('delivery'));
-    }
+      }).catch(err => {
+        if ([401, 403].includes(err.status)) clearToken('delivery');
+        else setSessionError(true);
+      }).finally(() => setSessionLoading(false));
+    } else setSessionLoading(false);
     return () => {
       stopTracking();
       if (permissionStatusRef.current) permissionStatusRef.current.onchange = null;
       permissionStatusRef.current = null;
     };
-  }, []);
+  }, [sessionAttempt, setMessage]);
 
   async function refreshGeoPermission() {
     if (typeof navigator === 'undefined' || !navigator.permissions?.query) {
@@ -87,20 +103,29 @@ export default function DeliveryDashboardPage() {
 
   useEffect(() => {
     if (!user) return;
-    loadOrders();
+    loadOrders(true);
     const timer = setInterval(loadOrders, 10000);
     return () => clearInterval(timer);
   }, [user]);
 
   useEffect(() => {
-    if (!hasMapsKey || !window.google?.maps || !activeOrder?.latitude || !activeOrder?.longitude) return;
+    if (!hasMapsKey || !mapsReady || !window.google?.maps || !activeOrder?.latitude || !activeOrder?.longitude) return;
     const target = document.getElementById('delivery-boy-map');
     if (!target) return;
     const destination = { lat: Number(activeOrder.latitude), lng: Number(activeOrder.longitude) };
     mapRef.current = new window.google.maps.Map(target, { center: destination, zoom: 14, mapTypeControl: false, streetViewControl: false, fullscreenControl: false });
     new window.google.maps.Marker({ position: destination, map: mapRef.current, label: 'C', title: 'Customer' });
+    return () => {
+      if (mapRef.current) window.google.maps.event.clearInstanceListeners(mapRef.current);
+      markerRef.current?.setMap(null);
+      markerRef.current = null;
+      mapRef.current = null;
+    };
+  }, [activeOrder?.id, activeOrder?.latitude, activeOrder?.longitude, hasMapsKey, mapsReady]);
+
+  useEffect(() => {
     if (tracking) updateDriverMarker(tracking);
-  }, [activeOrder?.id, activeOrder?.latitude, activeOrder?.longitude, hasMapsKey, tracking]);
+  }, [tracking, mapsReady, activeOrder?.id]);
 
   async function deliveryLogin() {
     setLoading(true);
@@ -117,12 +142,16 @@ export default function DeliveryDashboardPage() {
     }
   }
 
-  async function loadOrders() {
+  async function loadOrders(showLoading = false) {
+    if (showLoading) setOrdersLoading(true);
     try {
       const data = await api('/delivery/orders');
       setOrders(data.orders || []);
+      setOrdersError('');
     } catch (err) {
-      setMessage(err.message);
+      setOrdersError(err.message);
+    } finally {
+      setOrdersLoading(false);
     }
   }
 
@@ -134,7 +163,8 @@ export default function DeliveryDashboardPage() {
     } else {
       markerRef.current.setPosition(point);
     }
-    mapRef.current.panTo(point);
+    if (reducedMotionPreferred()) mapRef.current.setCenter(point);
+    else mapRef.current.panTo(point);
   }
 
   function gpsErrorMessage(error) {
@@ -161,11 +191,13 @@ export default function DeliveryDashboardPage() {
     }
     try {
       setActiveOrderId(order.id);
-      setMessage('Requesting GPS permission. Keep this page open so live location can update.');
+      setMessage('Requesting GPS permission. Keep this page open so live location can update.', 'info');
       setGpsState(state => ({ ...state, error: '', active: false }));
       stopTracking(false);
+      const request = ++locationRequestRef.current;
       navigator.geolocation.getCurrentPosition(
         async pos => {
+          if (request !== locationRequestRef.current) return;
           if (!isValidGpsPosition(pos)) {
             setGpsState(state => ({ ...state, active: false, error: 'GPS returned an incomplete location. Please try again.' }));
             return;
@@ -174,10 +206,13 @@ export default function DeliveryDashboardPage() {
             if (order.status !== 'out_for_delivery') {
               await api(`/delivery/orders/${order.id}/start`, { method: 'POST', body: JSON.stringify({}) });
             }
+            if (request !== locationRequestRef.current) return;
             await sendLocation(order.id, pos, true);
+            if (request !== locationRequestRef.current) return;
             setGpsState(state => ({ ...state, active: true, error: '' }));
             watchRef.current = navigator.geolocation.watchPosition(
               update => {
+                if (request !== locationRequestRef.current) return;
                 if (!isValidGpsPosition(update)) {
                   setGpsState(state => ({ ...state, error: 'GPS update did not include valid coordinates.' }));
                   return;
@@ -185,17 +220,20 @@ export default function DeliveryDashboardPage() {
                 sendLocation(order.id, update);
               },
               error => {
+                if (request !== locationRequestRef.current) return;
                 setGpsState(state => ({ ...state, active: false, error: gpsErrorMessage(error) }));
               },
               { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
             );
             loadOrders();
           } catch (err) {
+            if (request !== locationRequestRef.current) return;
             setMessage(err.message);
             setGpsState(state => ({ ...state, active: false, error: err.message }));
           }
         },
         error => {
+          if (request !== locationRequestRef.current) return;
           setGpsState(state => ({ ...state, active: false, error: gpsErrorMessage(error) }));
         },
         { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
@@ -223,11 +261,13 @@ export default function DeliveryDashboardPage() {
     } catch (err) {
       setMessage(err.message);
       setGpsState(state => ({ ...state, error: err.message }));
+      if (force) throw err;
     }
   }
 
   function stopTracking(resetState = true) {
-    if (watchRef.current) navigator.geolocation.clearWatch(watchRef.current);
+    ++locationRequestRef.current;
+    if (watchRef.current !== null) navigator.geolocation.clearWatch(watchRef.current);
     watchRef.current = null;
     lastSentRef.current = null;
     if (resetState) setGpsState(state => ({ ...state, active: false }));
@@ -238,7 +278,7 @@ export default function DeliveryDashboardPage() {
       await api(`/delivery/orders/${order.id}/delivered`, { method: 'POST', body: JSON.stringify({}) });
       stopTracking();
       setTracking(null);
-      setMessage('Order marked delivered.');
+      setMessage('Order marked delivered.', 'success');
       loadOrders();
     } catch (err) {
       setMessage(err.message);
@@ -310,7 +350,12 @@ export default function DeliveryDashboardPage() {
     clearToken('delivery');
     setUser(null);
     setOrders([]);
+    setOrdersError('');
+    setOrdersLoading(true);
   }
+
+  if (sessionLoading) return <main className="delivery-page"><section className="delivery-login-card"><h1>Delivery Dashboard</h1><LoadingState label="Checking your delivery session…" /></section></main>;
+  if (sessionError) return <main className="delivery-page"><section className="delivery-login-card"><h1>Delivery Dashboard</h1><ErrorState title="Your session could not be checked" message="Please check your connection and try again." onRetry={() => setSessionAttempt(attempt => attempt + 1)} /></section></main>;
 
   if (!user) {
     return (
@@ -318,9 +363,9 @@ export default function DeliveryDashboardPage() {
         <section className="delivery-login-card">
           <Truck size={34} />
           <h1>Delivery Dashboard</h1>
-          {message ? <p className="notice error">{message}</p> : null}
-          <input placeholder="Email" value={login.email} onChange={e => setLogin({ ...login, email: e.target.value })} />
-          <input type="password" placeholder="Password" value={login.password} onChange={e => setLogin({ ...login, password: e.target.value })} />
+          {message ? <Toast tone={messageTone} onDismiss={() => setMessage('')}>{message}</Toast> : null}
+          <input aria-label="Delivery account email" type="email" autoComplete="username" placeholder="Email" value={login.email} onChange={e => setLogin({ ...login, email: e.target.value })} />
+          <input aria-label="Password" type="password" autoComplete="current-password" placeholder="Password" value={login.password} onChange={e => setLogin({ ...login, password: e.target.value })} />
           <button onClick={deliveryLogin} disabled={loading}>{loading ? <Loader2 className="spin" size={16} /> : null} Sign in</button>
           <Link className="small-note" href="/">Back to website</Link>
         </section>
@@ -330,17 +375,19 @@ export default function DeliveryDashboardPage() {
 
   return (
     <main className="delivery-page">
-      {hasMapsKey ? <Script src={`https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(mapsKey)}`} strategy="afterInteractive" /> : null}
+      {hasMapsKey ? <Script src={`https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(mapsKey)}`} strategy="afterInteractive" onReady={() => { setMapsReady(true); setMapsError(''); }} onError={() => setMapsError('The map could not load. You can still open directions for an assigned delivery.')} /> : null}
       <section className="container delivery-header">
         <div><span className="eyebrow">Delivery partner</span><h1>Assigned orders</h1></div>
         <button className="ghost" onClick={logout}><LogOut size={16} /> Logout</button>
       </section>
       <section className="container delivery-grid">
         <div className="delivery-order-list">
-          {message ? <p className="notice error">{message}</p> : null}
-          {!orders.length ? <div className="empty-state">No active assigned deliveries.</div> : orders.map(order => (
+          {message && message !== gpsState.error ? <Toast tone={messageTone} onDismiss={() => setMessage('')}>{message}</Toast> : null}
+          {ordersLoading ? <LoadingState label="Loading assigned deliveries…" cards={2} rows={4} /> : null}
+          {ordersError ? <ErrorState title="Assigned orders could not be refreshed" message={`${ordersError}${orders.length ? ' Your last available assignments are shown below.' : ''}`} onRetry={() => loadOrders(true)} retrying={ordersLoading} /> : null}
+          {!ordersLoading && !ordersError && !orders.length ? <EmptyState title="No active deliveries" message="New assignments will appear here automatically. You can also check again now."><button className="ghost" onClick={() => loadOrders(true)}>Refresh assignments</button></EmptyState> : !ordersLoading ? orders.map(order => (
             <article className={activeOrder?.id === order.id ? 'delivery-order-card active' : 'delivery-order-card'} key={order.id} onClick={() => setActiveOrderId(order.id)}>
-              <div className="summary-header"><h2>{order.order_number}</h2><span className="badge success">{statusLabel(order.status)}</span></div>
+              <div className="summary-header"><h2><button className="ghost" aria-label={`Select delivery ${order.order_number}`} aria-pressed={activeOrder?.id === order.id} onClick={() => setActiveOrderId(order.id)}>{order.order_number}</button></h2><span className="badge success">{statusLabel(order.status)}</span></div>
               <p><strong>{order.customer_name}</strong> | {order.customer_phone}</p>
               <p>{order.delivery_address}</p>
               <p className="small-note">{order.items_summary}</p>
@@ -355,10 +402,11 @@ export default function DeliveryDashboardPage() {
               </div>
               {directionsError && activeOrder?.id === order.id ? <p className="notice error">{directionsError}</p> : null}
             </article>
-          ))}
+          )) : null}
         </div>
         <aside className="delivery-map-panel">
           <h2>Live GPS</h2>
+          {mapsError ? <p className="notice error" role="alert">{mapsError}</p> : null}
           <div className="gps-status-card">
             <div><span>Permission</span><strong>{gpsState.permission}</strong></div>
             <div><span>Secure context</span><strong>{gpsState.secureContext ? 'Yes' : 'No'}</strong></div>

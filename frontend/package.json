@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build --webpack",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test:prelaunch": "npm run test",
+    "test:http": "node tests/prelaunch-http.test.mjs",
+    "test": "node --test tests/analytics.test.mjs tests/seo.test.mjs tests/security-headers.test.mjs tests/product-pricing.test.mjs tests/dialog-and-menu-regressions.test.mjs tests/admin-dialogs.test.mjs tests/staff-cart.test.mjs tests/staff-admin-features.test.mjs tests/option-availability.test.mjs"
   },
   "dependencies": {
     "lucide-react": "0.468.0",

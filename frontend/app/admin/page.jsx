@@ -1,7 +1,7 @@
 import { notFound } from 'next/navigation';
 
 export const metadata = {
-  title: 'Not Found',
+  title: 'Page not found | The Pizza House',
   robots: {
     index: false,
     follow: false

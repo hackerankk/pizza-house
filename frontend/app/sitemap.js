@@ -1,7 +1,7 @@
+import { indexableSite, siteOrigin } from './seo';
+
 export default function sitemap() {
-  const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
-  return [
-    { url: baseUrl, lastModified: new Date() },
-    { url: `${baseUrl}/account`, lastModified: new Date() }
-  ];
+  if (!indexableSite()) return [];
+  const origin = siteOrigin();
+  return [{ url: `${origin}/` }, { url: `${origin}/privacy` }];
 }

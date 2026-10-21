@@ -6,6 +6,9 @@ import { useParams, useSearchParams } from 'next/navigation';
 import Script from 'next/script';
 import { CheckCircle2, Clock, CreditCard, FileText, PackageCheck, Pizza, Printer, Share2, Truck } from 'lucide-react';
 import { api, applyTheme, downloadInvoice, inr, itemSelectionText, itemVariantText, openInvoice, orderAccessQuery, rememberGuestOrder, whatsappOrderSummary } from '../../lib';
+import { ErrorState, LoadingState } from '../../components/AsyncState';
+import { Toast, useToastMessage } from '../../components/ui';
+import { reducedMotionPreferred } from '../../motion';
 
 const statuses = [
   ['received', Clock],
@@ -47,7 +50,8 @@ function OrderTrackingContent() {
   const [mapLoaded, setMapLoaded] = useState(false);
   const [mapsKey, setMapsKey] = useState('');
   const [loading, setLoading] = useState(true);
-  const [message, setMessage] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [message, setMessage] = useToastMessage();
   const [viewer, setViewer] = useState(null);
   const mapRef = useRef(null);
   const driverMarkerRef = useRef(null);
@@ -69,6 +73,12 @@ function OrderTrackingContent() {
 
   useEffect(() => {
     if (!orderId) return;
+    setLoading(true);
+    setMessage('');
+    setOrder(null);
+    setHistory([]);
+    setItems([]);
+    setPayments([]);
     if (guestAccessToken) rememberGuestOrder(orderId, guestAccessToken);
     let stopped = false;
     let timer = null;
@@ -80,7 +90,7 @@ function OrderTrackingContent() {
     const load = () => api(`/orders/${orderId}/track${accessQuery ? `?${accessQuery}` : ''}`).then(data => {
       if (stopped) return;
       setOrder(data.order);
-      setHistory(data.history);
+      setHistory(data.history || []);
       setItems(data.items || []);
       setPayments(data.payments || []);
       setDeliveryBoy(data.delivery_boy || null);
@@ -92,7 +102,8 @@ function OrderTrackingContent() {
       if (!stopped) {
         setMessage(err.message);
         setLoading(false);
-        if (!['Order not found', 'Unauthorized', 'Account is inactive'].includes(err.message)) schedule(null);
+        if ([401, 403, 404].includes(err.status)) setOrder(null);
+        if (![401, 403, 404, 422].includes(err.status)) schedule(null);
       }
     });
     load();
@@ -100,7 +111,7 @@ function OrderTrackingContent() {
       stopped = true;
       if (timer) clearTimeout(timer);
     };
-  }, [orderId, guestAccessToken]);
+  }, [orderId, guestAccessToken, loadAttempt, setMessage]);
 
   useEffect(() => {
     const liveTrackingActive = order?.order_type === 'delivery' && ['picked_up', 'out_for_delivery'].includes(order?.status);
@@ -121,7 +132,8 @@ function OrderTrackingContent() {
     } else {
       driverMarkerRef.current.setPosition(driver);
     }
-    mapRef.current.panTo(driver);
+    if (reducedMotionPreferred()) mapRef.current.setCenter(driver);
+    else mapRef.current.panTo(driver);
 
     const moved = lastRouteRef.current.lat === null || Math.hypot(driver.lat - lastRouteRef.current.lat, driver.lng - lastRouteRef.current.lng) > 0.001;
     const elapsed = Date.now() - lastRouteRef.current.time > 30000;
@@ -163,6 +175,13 @@ function OrderTrackingContent() {
   return (
     <main className="tracking-page">
       {hasMapsKey ? <Script src={`https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(mapsKey)}`} strategy="afterInteractive" onLoad={() => setMapLoaded(true)} /> : null}
+      <nav className="container" aria-label="Breadcrumb" style={{ paddingTop: 20 }}>
+        <ol style={{ display: 'flex', flexWrap: 'wrap', gap: 8, listStyle: 'none', margin: 0, padding: 0 }}>
+          <li><Link href="/">Home</Link></li>
+          <li><span aria-hidden="true">/ </span><Link href="/account">Account</Link></li>
+          <li aria-current="page"><span aria-hidden="true">/ </span>{order?.order_number || 'Order tracking'}</li>
+        </ol>
+      </nav>
       <div className="container account-hero">
         <div>
           <span className="eyebrow">Live tracking</span>
@@ -172,8 +191,8 @@ function OrderTrackingContent() {
         <Link className="button ghost light" href={guestAccessToken ? '/#menu' : '/account'}>{guestAccessToken ? 'Back to menu' : 'Back to account'}</Link>
       </div>
       <div className="container">
-        {message && order ? <p className="notice error">{message}</p> : null}
-        {order ? (
+        {message && order ? <Toast tone="error" onDismiss={() => setMessage('')}><span>{message} Your last available order details are shown below.</span><button className="ghost" onClick={() => setLoadAttempt(attempt => attempt + 1)} disabled={loading}>Refresh order</button></Toast> : null}
+        {loading ? <LoadingState label="Loading order status and payment details…" cards={2} rows={5} /> : order ? (
           <section className="tracking-layout">
             <div className="stack">
               <section className="panel">
@@ -222,6 +241,7 @@ function OrderTrackingContent() {
               <section className="panel">
                 <div className="panel-heading"><h2>Status history</h2></div>
                 <div className="timeline">{history.map(item => <p key={item.id}><span>{item.created_at}</span>{statusLabel(item.new_status)}</p>)}</div>
+                {!history.length ? <p className="small-note">Status updates will appear here as your order progresses.</p> : null}
               </section>
             </div>
             <aside className="order-summary">
@@ -237,6 +257,7 @@ function OrderTrackingContent() {
               </div>
               <h3>Payment history</h3>
               {payments.map(payment => <p className="small-note" key={payment.id}>{payment.created_at}: {inr(payment.amount)} | {payment.status}</p>)}
+              {!payments.length ? <p className="small-note">No payment transactions recorded yet. Your payment status is shown above.</p> : null}
               <div className="action-row confirmation-actions">
                 <button className="ghost" onClick={() => viewInvoice(false)}><FileText size={16} /> View Invoice</button>
                 <button className="ghost" onClick={() => viewInvoice(true)}><Printer size={16} /> Download / Print</button>
@@ -244,18 +265,11 @@ function OrderTrackingContent() {
               </div>
             </aside>
           </section>
-        ) : loading ? (
-          <div className="empty-state">Loading order...</div>
         ) : (
-          <section className="panel tracking-error-card">
-            <span className="eyebrow">Order tracking</span>
-            <h2>{message || 'Unable to load order'}</h2>
-            <p>{message === 'Order not found' ? notFoundDetail : 'Please sign in with the customer account used for this order and try again.'}</p>
-            <div className="confirmation-actions">
+          <ErrorState title="Unable to load order" message={message === 'Order not found' ? notFoundDetail : message || 'Please check your connection or sign in with the customer account used for this order.'} onRetry={() => setLoadAttempt(attempt => attempt + 1)}>
               <Link className="button" href="/account">Go to account</Link>
               <Link className="button ghost" href="/#menu">Back to menu</Link>
-            </div>
-          </section>
+          </ErrorState>
         )}
       </div>
     </main>
@@ -264,7 +278,7 @@ function OrderTrackingContent() {
 
 export default function OrderTrackingPage() {
   return (
-    <Suspense fallback={<main className="tracking-page"><div className="container account-hero">Loading order...</div></main>}>
+    <Suspense fallback={<main className="tracking-page"><div className="container account-hero"><LoadingState label="Loading order status…" cards={2} rows={5} /></div></main>}>
       <OrderTrackingContent />
     </Suspense>
   );

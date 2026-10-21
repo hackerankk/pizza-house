@@ -10,6 +10,13 @@ function resolveApiBase() {
 
 export const API_BASE = resolveApiBase();
 
+function safeApiMessage(data, status, fallback = 'Request failed') {
+  if (status >= 500) return 'Service temporarily unavailable. Please try again.';
+  const message = typeof data.error === 'string' ? data.error : fallback;
+  if (/SQLSTATE|PDOException|stack trace|Fatal error|[A-Z]:\\|\/(var|home|srv)\//i.test(message)) return fallback;
+  return message;
+}
+
 const tokenKeys = {
   customer: 'pizza_house_customer_token',
   admin: 'pizza_house_admin_token',
@@ -84,11 +91,11 @@ export async function api(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers, cache: 'no-store', credentials: 'include' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    let message = data.error || 'Request failed';
-    if (res.status === 401) message = data.error || 'Your session has expired. Please login again.';
+    let message = safeApiMessage(data, res.status);
+    if (res.status === 401) message = safeApiMessage(data, res.status, 'Your session has expired. Please login again.');
     if (res.status === 403) {
       message = data.error && data.error !== 'Forbidden'
-        ? data.error
+        ? safeApiMessage(data, res.status)
         : 'You do not have permission to perform this action. Please login with an administrator account.';
     }
     const err = new Error(message);
@@ -107,7 +114,7 @@ export async function uploadApi(path, formData, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, { ...fetchOptions, method: options.method || 'POST', body: formData, headers, cache: 'no-store', credentials: 'include' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.error || 'Upload failed');
+    const err = new Error(safeApiMessage(data, res.status, 'Upload failed'));
     err.status = res.status;
     throw err;
   }
@@ -119,7 +126,7 @@ export async function refreshAdminSession() {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     clearToken('admin');
-    const err = new Error(data.error || 'Admin session expired');
+    const err = new Error(safeApiMessage(data, res.status, 'Admin session expired'));
     err.status = res.status;
     throw err;
   }
@@ -157,7 +164,7 @@ export async function invoiceBlob(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers, cache: 'no-store', credentials: 'include' });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    const err = new Error(data.error || 'Invoice request failed');
+    const err = new Error(safeApiMessage(data, res.status, 'Invoice request failed'));
     err.status = res.status;
     throw err;
   }
@@ -252,14 +259,16 @@ export function applyTheme(theme = {}, defaultMode = 'system', storageKey = 'piz
   Object.entries(map).forEach(([key, variable]) => {
     if (theme[key]) document.documentElement.style.setProperty(variable, theme[key]);
   });
-  if (theme.favicon_url) {
-    let link = document.querySelector("link[rel='icon']");
-    if (!link) {
-      link = document.createElement('link');
-      link.rel = 'icon';
-      document.head.appendChild(link);
+  if (Object.prototype.hasOwnProperty.call(theme, 'favicon_url')) {
+    const links = [...document.querySelectorAll("link[rel='icon'], link[rel='shortcut icon']")];
+    if (!links.length) {
+      const link = document.createElement('link');
+      link.rel = 'icon'; document.head.appendChild(link); links.push(link);
     }
-    link.href = theme.favicon_url;
+    links.forEach(link => {
+      link.href = theme.favicon_url ? productImage({ image_url: theme.favicon_url }) : '/brand/favicon-32.png';
+      link.removeAttribute('type'); link.removeAttribute('sizes');
+    });
   }
 }
 
@@ -286,12 +295,7 @@ export function productImage(item, index = 0) {
     if (/^https?:\/\//i.test(item.image_url) || item.image_url.startsWith('/')) return item.image_url;
     return `${API_BASE.replace(/\/$/, '')}/${item.image_url.replace(/^\/+/, '')}`;
   }
-  const fallback = [
-    'https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=900&q=80',
-    'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?auto=format&fit=crop&w=900&q=80',
-    'https://images.unsplash.com/photo-1594007654729-407eedc4be65?auto=format&fit=crop&w=900&q=80'
-  ];
-  return fallback[index % fallback.length];
+  return '/brand/image-unavailable.svg';
 }
 
 export function itemSelectionText(item) {

@@ -19,7 +19,7 @@ test('editing keeps active pizza sizes and all custom variants in separate maps'
   formFunction('editResource', {
     active: 'products', resourceFields: ['name', 'price'],
     setForm: next => { form = next; }, setNewVariantName() {},
-    clearProductImageSelection() {}, setEditing() {}, window: { scrollTo() {} },
+    clearProductImageSelection() {}, setEditing() {}, scrollBehavior: () => 'auto', window: { scrollTo() {} },
   }, [{ id: 9, name: 'Mixed product', price: 100, variants: [
     { name: 'S', price: 100, is_active: 1 }, { name: 'M', price: 150, is_active: 1 },
     { name: 'L', price: 200, is_active: 1 }, { name: 'Normal', price: 120, is_active: 1 },
