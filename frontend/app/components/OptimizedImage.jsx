@@ -1,6 +1,7 @@
 'use client';
 
 import Image from 'next/image';
+import { productImage } from '../lib';
 import { useRef } from 'react';
 import { isOptimizableImage } from '../../image-config.mjs';
 
@@ -8,8 +9,8 @@ import { isOptimizableImage } from '../../image-config.mjs';
 // framework optimizer; unknown remote hosts stay browser-loaded, never proxied.
 export default function OptimizedImage({ src, alt, width = 640, height = 480, sizes = '(max-width: 600px) 40vw, 240px', eager = false, onError, ...props }) {
   const failedSources = useRef(new Set());
-  const fallbackSource = '/brand/image-unavailable.svg';
-  const unavailableAlt = `${alt || 'Product'} — image unavailable`;
+  const fallbackSource = productImage(null);
+  const unavailableAlt = `${alt || 'Product'} — illustrative default pizza image`;
   const imageAlt = src === fallbackSource ? unavailableAlt : alt;
   const handleError = event => {
     const failed = event.currentTarget.currentSrc || event.currentTarget.src;

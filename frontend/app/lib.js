@@ -295,7 +295,12 @@ export function productImage(item, index = 0) {
     if (/^https?:\/\//i.test(item.image_url) || item.image_url.startsWith('/')) return item.image_url;
     return `${API_BASE.replace(/\/$/, '')}/${item.image_url.replace(/^\/+/, '')}`;
   }
-  return '/brand/image-unavailable.svg';
+  const defaults = [
+    'https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=900&q=80',
+    'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?auto=format&fit=crop&w=900&q=80',
+    'https://images.unsplash.com/photo-1594007654729-407eedc4be65?auto=format&fit=crop&w=900&q=80'
+  ];
+  return defaults[Math.abs(Number.isInteger(index) ? index : 0) % defaults.length];
 }
 
 export function itemSelectionText(item) {
