@@ -3687,7 +3687,7 @@ if ($path === '/staff/orders' && $method === 'GET') {
     $where = 'staff_id=?';
     $params = [$staff['id']];
     if ($activeOnly) {
-        $where .= " AND status NOT IN ('delivered','cancelled')";
+        $where .= " AND status NOT IN ('delivered','cancelled') AND NOT (status='picked_up' AND order_type IN ('takeaway','dine_in'))";
     }
     $pagination = pagination_params(30, 100);
     $stmt = paginated_query("SELECT id, order_number, guest_name AS customer_name, guest_phone AS customer_phone, guest_email AS customer_email, order_type, status, subtotal, discount_amount, discount_type, discount_description, delivery_charge, delivery_address, distance_km, total_amount, payment_mode, payment_method, payment_status, paid_amount, remaining_amount, cash_received, online_received, total_received, cash_change, change_amount, table_number, created_at FROM orders WHERE $where ORDER BY created_at DESC LIMIT ? OFFSET ?", $params, $pagination);
@@ -3706,7 +3706,7 @@ if ($path === '/staff/dashboard' && $method === 'GET') {
     }
     $currentOrders = [];
     if (!empty($permissions['view_current_orders'])) {
-        $currentStmt = db()->prepare("SELECT o.id, o.order_number, COALESCE(o.guest_name,u.name) AS customer_name, COALESCE(o.guest_phone,u.phone) AS customer_phone, o.order_type, o.source, o.status, o.total_amount, o.delivery_charge, o.delivery_address, o.payment_status, o.paid_amount, o.remaining_amount, o.payment_method, o.table_number, o.created_at FROM orders o LEFT JOIN users u ON u.id=o.user_id WHERE (o.staff_id=? OR (o.source='customer_online' AND o.payment_status IN ('Paid','Partially Paid','COD'))) AND o.status NOT IN ('delivered','cancelled') ORDER BY o.created_at DESC LIMIT 100");
+        $currentStmt = db()->prepare("SELECT o.id, o.order_number, COALESCE(o.guest_name,u.name) AS customer_name, COALESCE(o.guest_phone,u.phone) AS customer_phone, o.order_type, o.source, o.status, o.total_amount, o.delivery_charge, o.delivery_address, o.payment_status, o.paid_amount, o.remaining_amount, o.payment_method, o.table_number, o.created_at FROM orders o LEFT JOIN users u ON u.id=o.user_id WHERE (o.staff_id=? OR (o.source='customer_online' AND o.payment_status IN ('Paid','Partially Paid','COD'))) AND o.status NOT IN ('delivered','cancelled') AND NOT (o.status='picked_up' AND o.order_type IN ('takeaway','dine_in')) ORDER BY o.created_at DESC LIMIT 100");
         $currentStmt->execute([$staff['id']]);
         $currentOrders = $currentStmt->fetchAll();
     }

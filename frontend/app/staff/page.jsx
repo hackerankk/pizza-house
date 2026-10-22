@@ -144,7 +144,7 @@ function nextStaffStatuses(order) {
 }
 
 function staffCancellable(order) {
-  return order && !['delivered', 'cancelled'].includes(order.status);
+  return order && !['delivered', 'cancelled'].includes(order.status) && !(order.status === 'picked_up' && ['takeaway', 'dine_in'].includes(order.order_type));
 }
 
 function StaffBogoModal({ unlock, items, categories, weekday, onClose, onAdd }) {
@@ -303,7 +303,7 @@ export default function StaffPage() {
     dashboardLoadingRef.current = true;
     try {
       const data = await api('/staff/dashboard');
-      setStaffDashboard({ today: data.today || { orders: 0 }, current_orders: data.current_orders || [] });
+      setStaffDashboard({ today: data.today || { orders: 0 }, current_orders: (data.current_orders || []).filter(staffCancellable) });
       setDashboardError('');
       setPermissions({ ...defaultStaffPermissions, ...(data.permissions || {}) });
       const eligible = data.online_alerts || [];
@@ -838,7 +838,7 @@ export default function StaffPage() {
       setMessage('');
       await api(`/staff/orders/${order.id}`, { method: 'PUT', body: JSON.stringify({ status }) });
       setMessage(`Order ${order.order_number} updated.`, 'success');
-      if (['cancelled', 'delivered'].includes(status)) {
+      if (['cancelled', 'delivered'].includes(status) || (status === 'picked_up' && ['takeaway', 'dine_in'].includes(order.order_type))) {
         setStaffDashboard(current => ({
           ...current,
           current_orders: (current.current_orders || []).filter(row => Number(row.id) !== Number(order.id))
