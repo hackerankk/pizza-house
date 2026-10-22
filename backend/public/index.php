@@ -1,12 +1,31 @@
 <?php
 declare(strict_types=1);
 
+require_once dirname(__DIR__) . '/src/security.php';
+require_once dirname(__DIR__) . '/src/uploads.php';
+require_once dirname(__DIR__) . '/src/security_headers.php';
+require_once dirname(__DIR__) . '/src/invoice_mail.php';
+require_once dirname(__DIR__) . '/src/staff_pos.php';
+require_once dirname(__DIR__) . '/src/staff_bogo.php';
+
 ini_set('display_errors', '0');
+ini_set('display_startup_errors', '0');
+ini_set('zend.exception_ignore_args', '1');
 date_default_timezone_set('Asia/Kolkata');
 
 set_exception_handler(function (Throwable $e): void {
-    error_log('[The Pizza House] Unhandled API error: ' . $e->getMessage());
-    json_response(['error' => 'Server error', 'detail' => getenv('APP_ENV') === 'local' ? $e->getMessage() : null], 500);
+    if ($e instanceof RequestValidationException) json_response(['error'=>'Invalid request input','field'=>$e->field],422);
+    if ($e instanceof ApiException) json_response(['error'=>$e->getMessage()],$e->status);
+    $id = security_log_exception($e);
+    unset($GLOBALS['security_auth_buckets']);
+    json_response(['error' => 'Server error', 'request_id' => $id], 500);
+});
+register_shutdown_function(function (): void {
+    $error = error_get_last();
+    if ($error && in_array($error['type'], [E_ERROR,E_PARSE,E_CORE_ERROR,E_COMPILE_ERROR], true)) {
+        error_log('[The Pizza House] Fatal error: ' . json_encode($error));
+        if (!headers_sent()) { http_response_code(500); header('Content-Type: application/json'); echo '{"error":"Server error"}'; }
+    }
 });
 
 load_env(dirname(__DIR__) . '/.env');
@@ -17,6 +36,8 @@ define('PIZZA_CONFIG_LOADED', env('APP_ENV') !== 'local' && is_file($productionC
 if (PIZZA_CONFIG_LOADED) {
     require_once $productionConfig;
 }
+
+security_response_headers();
 
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 $allowedOrigin = allowed_cors_origin($origin);
@@ -127,10 +148,13 @@ function ensure_order_management_schema(): void {
     }
     $pdo = db();
     $dbName = env('DB_NAME', 'pizza_house');
-    $pdo->exec("ALTER TABLE users MODIFY role ENUM('customer','admin','delivery_boy','staff') NOT NULL DEFAULT 'customer'");
-    $userColumns = $pdo->prepare('SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?');
+    $userColumns = $pdo->prepare('SELECT COLUMN_NAME, COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?');
     $userColumns->execute([$dbName, 'users']);
-    $existingUserColumns = array_column($userColumns->fetchAll(), 'COLUMN_NAME');
+    $userColumnTypes = array_column($userColumns->fetchAll(), 'COLUMN_TYPE', 'COLUMN_NAME');
+    $existingUserColumns = array_keys($userColumnTypes);
+    if (($userColumnTypes['role'] ?? '') !== "enum('customer','admin','delivery_boy','staff')") {
+        $pdo->exec("ALTER TABLE users MODIFY role ENUM('customer','admin','delivery_boy','staff') NOT NULL DEFAULT 'customer'");
+    }
     if (!in_array('is_active', $existingUserColumns, true)) {
         $pdo->exec('ALTER TABLE users ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER role');
     }
@@ -176,9 +200,10 @@ function ensure_order_management_schema(): void {
         INDEX idx_admin_refresh_expires (expires_at),
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-    $stmt = $pdo->prepare('SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?');
+    $stmt = $pdo->prepare('SELECT COLUMN_NAME, COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?');
     $stmt->execute([$dbName, 'orders']);
-    $existing = array_column($stmt->fetchAll(), 'COLUMN_NAME');
+    $orderColumnTypes = array_column($stmt->fetchAll(), 'COLUMN_TYPE', 'COLUMN_NAME');
+    $existing = array_keys($orderColumnTypes);
     $nullableStmt = $pdo->prepare('SELECT IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1');
     $nullableStmt->execute([$dbName, 'orders', 'user_id']);
     if (($nullableStmt->fetchColumn() ?: 'NO') !== 'YES') {
@@ -206,7 +231,7 @@ function ensure_order_management_schema(): void {
     }
     if (!in_array('payment_method', $existing, true)) {
         $pdo->exec("ALTER TABLE orders ADD COLUMN payment_method ENUM('razorpay','cash','cod','online','split') NULL AFTER payment_mode");
-    } else {
+    } elseif (($orderColumnTypes['payment_method'] ?? '') !== "enum('razorpay','cash','cod','online','split')") {
         $pdo->exec("ALTER TABLE orders MODIFY payment_method ENUM('razorpay','cash','cod','online','split') NULL");
     }
     if (!in_array('discount_type', $existing, true)) {
@@ -325,11 +350,15 @@ function ensure_order_management_schema(): void {
     ensure_index('push_subscriptions', 'idx_push_subscriptions_user', 'user_id');
     ensure_index('order_status_history', 'idx_order_status_history_order_created', 'order_id, created_at');
     $offerColumns = [];
+    $offerColumnTypes = [];
     $offerColumnStmt = $pdo->query("SHOW COLUMNS FROM offers");
-    foreach ($offerColumnStmt->fetchAll() as $col) $offerColumns[] = $col['Field'];
+    foreach ($offerColumnStmt->fetchAll() as $col) {
+        $offerColumns[] = $col['Field'];
+        $offerColumnTypes[$col['Field']] = $col['Type'];
+    }
     if (!in_array('offer_type', $offerColumns, true)) {
         $pdo->exec("ALTER TABLE offers ADD COLUMN offer_type ENUM('bogo','fixed','percent') NOT NULL DEFAULT 'bogo' AFTER name");
-    } else {
+    } elseif (($offerColumnTypes['offer_type'] ?? '') !== "enum('bogo','fixed','percent')") {
         $pdo->exec("ALTER TABLE offers MODIFY offer_type ENUM('bogo','fixed','percent') NOT NULL DEFAULT 'bogo'");
     }
     if (!in_array('discount_value', $offerColumns, true)) {
@@ -375,8 +404,10 @@ function ensure_order_management_schema(): void {
         FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
         FOREIGN KEY (delivery_boy_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-    $pdo->exec("ALTER TABLE orders MODIFY status VARCHAR(40) NOT NULL DEFAULT 'received'");
-    $map = [
+    $expectedStatusType = "enum('received','accepted','preparing','ready','picked_up','out_for_delivery','delivered','cancelled')";
+    if (($orderColumnTypes['status'] ?? '') !== $expectedStatusType) {
+      $pdo->exec("ALTER TABLE orders MODIFY status VARCHAR(40) NOT NULL DEFAULT 'received'");
+      $map = [
         'Placed' => 'received',
         'Confirmed' => 'accepted',
         'Preparing' => 'preparing',
@@ -384,17 +415,22 @@ function ensure_order_management_schema(): void {
         'Delivered' => 'delivered',
         'Cancelled' => 'cancelled',
     ];
-    foreach ($map as $old => $new) {
+      foreach ($map as $old => $new) {
         $update = $pdo->prepare('UPDATE orders SET status=? WHERE status=?');
         $update->execute([$new, $old]);
         $hist = $pdo->prepare('UPDATE order_status_history SET new_status=? WHERE new_status=?');
         $hist->execute([$new, $old]);
         $histOld = $pdo->prepare('UPDATE order_status_history SET old_status=? WHERE old_status=?');
         $histOld->execute([$new, $old]);
+      }
+      $pdo->exec("ALTER TABLE orders MODIFY status ENUM('received','accepted','preparing','ready','picked_up','out_for_delivery','delivered','cancelled') NOT NULL DEFAULT 'received'");
     }
-    $pdo->exec("ALTER TABLE orders MODIFY status ENUM('received','accepted','preparing','ready','picked_up','out_for_delivery','delivered','cancelled') NOT NULL DEFAULT 'received'");
-    $pdo->exec("ALTER TABLE orders MODIFY order_type ENUM('delivery','takeaway','dine_in') NOT NULL DEFAULT 'delivery'");
-    $pdo->exec("ALTER TABLE orders MODIFY payment_mode ENUM('full','partial','cod','cash') NOT NULL");
+    if (($orderColumnTypes['order_type'] ?? '') !== "enum('delivery','takeaway','dine_in')") {
+        $pdo->exec("ALTER TABLE orders MODIFY order_type ENUM('delivery','takeaway','dine_in') NOT NULL DEFAULT 'delivery'");
+    }
+    if (($orderColumnTypes['payment_mode'] ?? '') !== "enum('full','partial','cod','cash')") {
+        $pdo->exec("ALTER TABLE orders MODIFY payment_mode ENUM('full','partial','cod','cash') NOT NULL");
+    }
     ensure_index('orders', 'idx_orders_source_created', 'source, created_at');
     ensure_index('orders', 'idx_orders_staff_created', 'staff_id, created_at');
     ensure_index('orders', 'idx_orders_created_source_payment', 'created_at, source, payment_method');
@@ -406,7 +442,7 @@ function ensure_order_management_schema(): void {
     }
     $channelType = $pdo->prepare('SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1');
     $channelType->execute([$dbName, 'notifications', 'channel']);
-    if (is_string($channelType->fetchColumn())) {
+    if ($channelType->fetchColumn() !== "enum('whatsapp','web_push','email')") {
         $pdo->exec("ALTER TABLE notifications MODIFY channel ENUM('whatsapp','web_push','email') NOT NULL");
     }
     $pdo->exec("CREATE TABLE IF NOT EXISTS order_email_logs (
@@ -472,10 +508,16 @@ function ensure_order_management_schema(): void {
         INDEX idx_promotional_popups_dates (start_at, end_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     try {
-        $pdo->exec("ALTER TABLE promotional_banners MODIFY destination_type ENUM('none','menu','product','category','offer','custom_url') NOT NULL DEFAULT 'none'");
-        $pdo->exec("ALTER TABLE promotional_popups MODIFY destination_type ENUM('none','menu','product','category','offer','custom_url') NOT NULL DEFAULT 'none'");
+        $destinationColumn = $pdo->prepare('SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND COLUMN_NAME=?');
+        foreach (['promotional_banners', 'promotional_popups'] as $promotionTable) {
+            $destinationColumn->execute([$dbName, $promotionTable, 'destination_type']);
+            if ($destinationColumn->fetchColumn() !== "enum('none','menu','product','category','offer','custom_url')") {
+                $pdo->exec("ALTER TABLE $promotionTable MODIFY destination_type ENUM('none','menu','product','category','offer','custom_url') NOT NULL DEFAULT 'none'");
+            }
+        }
     } catch (Throwable $e) {
         // Older MySQL variants may already have compatible enum definitions; validation below still protects writes.
+        security_log_exception($e, 'schema compatibility');
     }
     $pdo->prepare('INSERT IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?)')->execute(['customer_login_required', '0']);
     foreach ([
@@ -579,7 +621,7 @@ function today_range(): array {
 }
 
 function staff_permission_keys(): array {
-    return ['create_orders','view_current_orders','confirm_orders','mark_order_ready_complete','edit_orders','view_today_orders','view_reports','apply_manual_discount','view_customer_history','cancel_orders','delete_orders'];
+    return ['create_orders','view_current_orders','confirm_orders','mark_order_ready_complete','edit_orders','view_today_orders','view_reports','apply_manual_discount','apply_free_pizza','free_pizza_cross_category','manage_staff_bogo','view_customer_history','cancel_orders','delete_orders'];
 }
 
 function default_staff_permissions(): array {
@@ -592,6 +634,9 @@ function default_staff_permissions(): array {
         'view_today_orders' => true,
         'view_reports' => false,
         'apply_manual_discount' => false,
+        'apply_free_pizza' => false,
+        'free_pizza_cross_category' => false,
+        'manage_staff_bogo' => false,
         'view_customer_history' => false,
         'cancel_orders' => false,
         'delete_orders' => false,
@@ -651,6 +696,7 @@ function permanently_delete_order_if_safe(PDO $pdo, array $order): array {
         'payments' => 'payment records',
         'order_email_logs' => 'invoice/email logs',
         'notifications' => 'notification audit records',
+        'staff_order_adjustment_audit' => 'staff promotion or delivery audit records',
     ];
     foreach ($blockedTables as $table => $label) {
         $count = $pdo->prepare("SELECT COUNT(*) FROM $table WHERE order_id=?");
@@ -696,6 +742,7 @@ function order_tracking_payload(array $order): array {
 
 function public_order(array $order): array {
     unset($order['guest_access_token_hash'], $order['guest_access_expires_at']);
+    if (!empty($order['staff_delivery_snapshot']) && is_string($order['staff_delivery_snapshot'])) $order['staff_delivery_snapshot'] = json_decode($order['staff_delivery_snapshot'],true);
     return $order;
 }
 
@@ -715,6 +762,8 @@ function option_snapshot(array $line): string {
         'group_name' => (string)$option['group_name'],
         'name' => (string)$option['name'],
         'price' => money((float)$option['price']),
+        'quantity' => (int)($option['quantity'] ?? 1),
+        'line_total' => money((float)$option['price'] * (int)($option['quantity'] ?? 1)),
     ], $line['options'] ?? []);
     $crust = null;
     $toppings = [];
@@ -729,7 +778,8 @@ function option_snapshot(array $line): string {
             $addons[] = $option;
         }
     }
-    return json_encode([
+    $snapshot = json_encode([
+        'client_key' => (string)($line['client_key'] ?? ''),
         'variant' => $line['variant'] ? [
             'id' => (int)$line['variant']['id'],
             'name' => (string)$line['variant']['name'],
@@ -743,8 +793,18 @@ function option_snapshot(array $line): string {
             'is_free' => true,
             'parent_key' => (string)($line['bogo_parent_key'] ?? ''),
             'original_price' => money((float)($line['unit_price'] ?? 0)),
+            'staff_policy' => $line['staff_bogo_policy'] ?? null,
+        ] : null,
+        'manual_free' => !empty($line['is_manual_free']) ? [
+            'is_free' => true,
+            'parent_key' => (string)$line['manual_parent_key'],
+            'original_price' => money((float)$line['unit_price']),
+            'discount' => money((float)$line['unit_price'] * (int)$line['quantity']),
+            'applied_by' => (int)$line['manual_applied_by'],
         ] : null,
     ], JSON_UNESCAPED_SLASHES);
+    if ($snapshot === false || strlen($snapshot) > 65535) throw new ApiException('Item selections are too large to save. Select fewer options or BOGO products.',422);
+    return $snapshot;
 }
 
 function decoded_item_options(?string $snapshot): array {
@@ -755,12 +815,14 @@ function decoded_item_options(?string $snapshot): array {
     if (is_array($decoded)) {
         $options = $decoded['options'] ?? [];
         return [
+            'client_key' => (string)($decoded['client_key'] ?? ''),
             'variant' => $decoded['variant'] ?? null,
             'crust' => $decoded['crust'] ?? null,
             'toppings' => $decoded['toppings'] ?? [],
             'addons' => $decoded['addons'] ?? [],
             'options' => is_array($options) ? $options : [],
             'bogo' => is_array($decoded['bogo'] ?? null) ? $decoded['bogo'] : null,
+            'manual_free' => is_array($decoded['manual_free'] ?? null) ? $decoded['manual_free'] : null,
             'display' => option_display_text($decoded),
         ];
     }
@@ -769,14 +831,15 @@ function decoded_item_options(?string $snapshot): array {
 
 function option_display_text(array $decoded): string {
     $parts = [];
+    $optionLabel = fn($o) => (string)($o['name'] ?? '') . ' x' . (int)($o['quantity'] ?? 1) . ' (INR ' . number_format((float)($o['price'] ?? 0) * (int)($o['quantity'] ?? 1), 2) . ')';
     if (!empty($decoded['crust']['name'])) {
-        $parts[] = 'Crust: ' . $decoded['crust']['name'];
+        $parts[] = 'Crust: ' . $optionLabel($decoded['crust']);
     }
     if (!empty($decoded['toppings']) && is_array($decoded['toppings'])) {
-        $parts[] = 'Toppings: ' . implode(', ', array_map(fn($o) => (string)($o['name'] ?? ''), $decoded['toppings']));
+        $parts[] = 'Toppings: ' . implode(', ', array_map($optionLabel, $decoded['toppings']));
     }
     if (!empty($decoded['addons']) && is_array($decoded['addons'])) {
-        $parts[] = 'Add-ons: ' . implode(', ', array_map(fn($o) => (string)($o['name'] ?? ''), $decoded['addons']));
+        $parts[] = 'Add-ons: ' . implode(', ', array_map($optionLabel, $decoded['addons']));
     }
     if (!$parts && !empty($decoded['options']) && is_array($decoded['options'])) {
         $parts[] = implode(', ', array_map(fn($o) => trim((string)($o['group_name'] ?? '') . ': ' . (string)($o['name'] ?? ''), ': '), $decoded['options']));
@@ -792,10 +855,18 @@ function public_order_item(array $item): array {
     $item['is_bogo_free'] = !empty($meta['bogo']['is_free']);
     $item['bogo_parent_key'] = (string)($meta['bogo']['parent_key'] ?? '');
     $item['bogo_original_price'] = $meta['bogo']['original_price'] ?? null;
+    $item['client_key'] = $meta['client_key'] ?? ('order-item-' . $item['id']);
+    if ($item['client_key'] === '') $item['client_key'] = 'order-item-' . $item['id'];
+    $item['is_manual_free'] = !empty($meta['manual_free']['is_free']);
+    $item['manual_parent_key'] = (string)($meta['manual_free']['parent_key'] ?? '');
+    $item['manual_original_price'] = $meta['manual_free']['original_price'] ?? null;
+    $item['manual_free_discount'] = $meta['manual_free']['discount'] ?? null;
+    $item['payable_line_total'] = ($item['is_manual_free'] || $item['is_bogo_free']) ? 0.0 : money((float)$item['line_total']);
     return $item;
 }
 
 function json_response(array $payload, int $status = 200): void {
+    if (isset($GLOBALS['security_auth_buckets'])) security_auth_result($status);
     http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode($payload, JSON_UNESCAPED_SLASHES);
@@ -821,9 +892,18 @@ function paginated_query(string $sql, array $params, array $pagination): PDOStat
 }
 
 function input(): array {
-    $raw = file_get_contents('php://input') ?: '';
-    $data = json_decode($raw, true);
-    return is_array($data) ? $data : [];
+    $multipart = str_starts_with(strtolower($_SERVER['CONTENT_TYPE'] ?? ''), 'multipart/form-data');
+    $max = $multipart ? security_config('UPLOAD_MAX_BYTES',5242880) + 65536 : security_config('REQUEST_MAX_BYTES',262144);
+    if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > $max) json_response(['error'=>'Request body is too large'],413);
+    if ($multipart) return [];
+    $raw = file_get_contents('php://input',false,null,0,$max+1);
+    if ($raw === false || strlen($raw) > $max) json_response(['error'=>'Request body is too large'],413);
+    if ($raw === '') { $GLOBALS['security_json_object'] = new stdClass(); return []; }
+    if (!preg_match('#^application/json(?:\s*;.*)?$#i',$_SERVER['CONTENT_TYPE'] ?? '')) json_response(['error'=>'Content-Type must be application/json'],415);
+    try { $object=json_decode($raw,false,16,JSON_THROW_ON_ERROR); } catch (JsonException $e) { json_response(['error'=>'Malformed JSON request'],400); }
+    if (!$object instanceof stdClass) json_response(['error'=>'JSON body must be an object'],400);
+    $GLOBALS['security_json_object']=$object;
+    return json_decode($raw,true,16,JSON_THROW_ON_ERROR);
 }
 
 function route_path(): string {
@@ -1107,6 +1187,8 @@ function masked_secret(?string $value): string {
 }
 
 function sanitized_settings(array $settings, bool $includeIntegrations = false): array {
+    // Explicit public/admin allowlist: future private settings cannot leak by default.
+    $settings = array_intersect_key($settings, security_settings_fields());
     foreach (['razorpay_key_id','razorpay_key_secret','razorpay_mode','google_maps_api_key'] as $key) {
         if (!$includeIntegrations) {
             unset($settings[$key]);
@@ -1118,7 +1200,9 @@ function sanitized_settings(array $settings, bool $includeIntegrations = false):
 }
 
 function configured_setting(array $settings, string $key): string {
-    return trim((string)($settings[$key] ?? ''));
+    $value = trim((string)($settings[$key] ?? ''));
+    if ($value !== '' && in_array($key, ['razorpay_key_secret','google_maps_api_key'], true)) $GLOBALS['security_private_values'][$key] = $value;
+    return $value;
 }
 
 function razorpay_config(): array {
@@ -1145,7 +1229,7 @@ function google_maps_config(): array {
     $storedKey = configured_setting($s, 'google_maps_api_key');
     $hasStoredConfig = $storedKey !== '';
     $enabled = (($s['google_maps_enabled'] ?? '1') === '1');
-    $key = $hasStoredConfig ? $storedKey : trim((string)env('GOOGLE_MAPS_API_KEY', ''));
+    $key = $hasStoredConfig ? $storedKey : trim((string)env('GOOGLE_MAPS_BROWSER_API_KEY', ''));
     return [
         'enabled' => $enabled,
         'configured' => $enabled && $key !== '',
@@ -1248,13 +1332,15 @@ function test_external_get(string $url, ?string $userPassword = null): array {
     curl_close($ch);
     $json = json_decode((string)$response, true);
     if ($response === false || $curlError !== '') {
-        return ['ok' => false, 'status' => $status ?: null, 'message' => $curlError];
+        security_log_exception(new RuntimeException($curlError), 'integration');
+        return ['ok' => false, 'status' => $status ?: null, 'message' => 'External service could not be reached'];
     }
     if ($status >= 400) {
         $message = is_array($json)
             ? ($json['error']['description'] ?? $json['error_message'] ?? $json['error']['reason'] ?? $json['status'] ?? 'External API rejected the configuration')
             : 'External API rejected the configuration';
-        return ['ok' => false, 'status' => $status, 'message' => $message];
+        security_log_exception(new RuntimeException((string)$message), 'integration');
+        return ['ok' => false, 'status' => $status, 'message' => 'External service rejected the configuration'];
     }
     return ['ok' => true, 'status' => $status, 'message' => 'Configuration accepted'];
 }
@@ -1270,18 +1356,18 @@ function slugify(string $value): string {
 }
 
 function public_upload_path(string $relativePath): string {
-    $root = realpath(__DIR__);
+    $root = private_upload_root();
     if (!$root) {
         throw new RuntimeException('Public directory is not available');
     }
-    $relativePath = ltrim(str_replace(['\\', "\0"], ['/', ''], $relativePath), '/');
+    if (!secure_upload_relative($relativePath)) throw new RuntimeException('Invalid upload path');
     $target = $root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath);
     $parent = dirname($target);
-    if (!is_dir($parent) && !mkdir($parent, 0755, true) && !is_dir($parent)) {
+    if (!is_dir($parent) && !mkdir($parent, 0750, true) && !is_dir($parent)) {
         throw new RuntimeException('Upload directory could not be created');
     }
     $resolvedParent = realpath($parent);
-    if (!$resolvedParent || !str_starts_with($resolvedParent, $root)) {
+    if (!$resolvedParent || !str_starts_with($resolvedParent, $root . DIRECTORY_SEPARATOR)) {
         throw new RuntimeException('Invalid upload path');
     }
     return $target;
@@ -1297,7 +1383,7 @@ function uploaded_image_path(array $file, string $baseName, string $directory, s
         ];
         json_response(['error' => $errors[$file['error']] ?? 'Image upload failed'], 422);
     }
-    if ((int)($file['size'] ?? 0) <= 0 || (int)$file['size'] > 5 * 1024 * 1024) {
+    if ((int)($file['size'] ?? 0) <= 0 || (int)$file['size'] > security_config('UPLOAD_MAX_BYTES',5242880)) {
         json_response(['error' => "$label image must be 5MB or smaller"], 422);
     }
     $original = (string)($file['name'] ?? '');
@@ -1310,6 +1396,7 @@ function uploaded_image_path(array $file, string $baseName, string $directory, s
     if ($tmp === '' || !is_uploaded_file($tmp)) {
         json_response(['error' => 'Invalid uploaded image'], 422);
     }
+    if (filesize($tmp) !== (int)$file['size']) json_response(['error'=>'Invalid upload size'],422);
     $finfo = new finfo(FILEINFO_MIME_TYPE);
     $mime = $finfo->file($tmp) ?: '';
     $allowedMimes = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp'];
@@ -1327,10 +1414,8 @@ function uploaded_image_path(array $file, string $baseName, string $directory, s
     }
     $relative = $directory . '/' . $filename;
     $target = public_upload_path($relative);
-    if (!move_uploaded_file($tmp, $target)) {
-        json_response(['error' => 'Unable to save uploaded image'], 500);
-    }
-    @chmod($target, 0644);
+    security_store_image($tmp,$target,$mime);
+    @chmod($target, 0640);
     return $relative;
 }
 
@@ -1356,7 +1441,7 @@ function uploaded_notification_sound_path(array $file, string $baseName = 'new-o
         ];
         json_response(['error' => $errors[$file['error']] ?? 'Sound upload failed'], 422);
     }
-    if ((int)($file['size'] ?? 0) <= 0 || (int)$file['size'] > 5 * 1024 * 1024) {
+    if ((int)($file['size'] ?? 0) <= 0 || (int)$file['size'] > security_config('UPLOAD_MAX_BYTES',5242880)) {
         json_response(['error' => 'Notification sound must be 5MB or smaller'], 422);
     }
     $original = (string)($file['name'] ?? '');
@@ -1384,6 +1469,7 @@ function uploaded_notification_sound_path(array $file, string $baseName = 'new-o
     if (!isset($allowedMimes[$mime]) || $allowedMimes[$mime] !== $allowedExtensions[$extension]) {
         json_response(['error' => 'Uploaded file content does not match an allowed sound type'], 422);
     }
+    if (filesize($tmp) !== (int)$file['size'] || !security_audio_content_valid($tmp,$allowedExtensions[$extension])) json_response(['error'=>'Invalid audio content'],422);
     $safeBase = slugify($baseName);
     $filename = $safeBase . '-' . bin2hex(random_bytes(8)) . '.' . $allowedMimes[$mime];
     $relative = 'uploads/notifications/' . $filename;
@@ -1391,33 +1477,20 @@ function uploaded_notification_sound_path(array $file, string $baseName = 'new-o
     if (!move_uploaded_file($tmp, $target)) {
         json_response(['error' => 'Unable to save uploaded notification sound'], 500);
     }
-    @chmod($target, 0644);
+    @chmod($target, 0640);
     return $relative;
 }
 
 function delete_local_upload(?string $relativePath): void {
-    if (!$relativePath) {
-        return;
-    }
-    $relativePath = ltrim(str_replace(['\\', "\0"], ['/', ''], $relativePath), '/');
-    if (!str_starts_with($relativePath, 'uploads/products/') && !str_starts_with($relativePath, 'uploads/promotions/') && !str_starts_with($relativePath, 'uploads/categories/') && !str_starts_with($relativePath, 'uploads/notifications/')) {
-        return;
-    }
-    $root = realpath(__DIR__);
-    if (!$root) {
-        return;
-    }
-    $target = $root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath);
-    $resolved = realpath($target);
-    $products = $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'products' . DIRECTORY_SEPARATOR;
-    $promotions = $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'promotions' . DIRECTORY_SEPARATOR;
-    $categories = $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'categories' . DIRECTORY_SEPARATOR;
-    $notifications = $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'notifications' . DIRECTORY_SEPARATOR;
-    if ($resolved && (str_starts_with($resolved, $products) || str_starts_with($resolved, $promotions) || str_starts_with($resolved, $categories) || str_starts_with($resolved, $notifications)) && is_file($resolved)) {
-        @unlink($resolved);
+    if (!$relativePath || !secure_upload_relative($relativePath)) return;
+    foreach ([private_upload_root(), realpath(__DIR__)] as $root) {
+        if (!$root) continue;
+        $resolved = realpath($root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath));
+        if ($resolved && str_starts_with($resolved, $root . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR) && is_file($resolved)) {
+            if (!unlink($resolved)) throw new RuntimeException('Could not remove uploaded file');
+        }
     }
 }
-
 function haversine(float $lat1, float $lon1, float $lat2, float $lon2): float {
     $earth = 6371;
     $dLat = deg2rad($lat2 - $lat1);
@@ -1528,7 +1601,7 @@ function delivery_rule_result(float $orderAmount, float $distance, string $order
 }
 
 function delivery_quote(float $lat, float $lng, float $orderAmount = 0.0, string $orderType = 'delivery'): array {
-    if ($lat < -90 || $lat > 90 || $lng < -180 || $lng > 180) {
+    if (!valid_coordinates($lat, $lng)) {
         json_response(['error' => 'Invalid delivery coordinates'], 422);
     }
     $s = settings();
@@ -1664,9 +1737,15 @@ function restaurant_now(?string $override = null): DateTimeImmutable {
 
 function offer_active_at(array $offer, DateTimeImmutable $now): bool {
     if ((int)($offer['is_active'] ?? 0) !== 1) return false;
-    $nowStr = $now->format('Y-m-d H:i:s');
-    if (!empty($offer['starts_at']) && (string)$offer['starts_at'] > $nowStr) return false;
-    if (!empty($offer['expires_at']) && (string)$offer['expires_at'] < $nowStr) return false;
+    foreach (['starts_at', 'expires_at'] as $field) {
+        if (empty($offer[$field])) continue;
+        try {
+            $value = str_replace('T', ' ', (string)$offer[$field]);
+            if (strlen($value) === 10 && $field === 'expires_at') $value .= ' 23:59:59';
+            $boundary = new DateTimeImmutable($value, restaurant_timezone());
+            if ($field === 'starts_at' ? $now < $boundary : $now > $boundary) return false;
+        } catch (Throwable $e) { return false; }
+    }
     $day = strtolower($now->format('l'));
     $weekdays = json_string_list($offer['weekdays'] ?? '');
     if ($weekdays && !in_array($day, $weekdays, true)) return false;
@@ -1686,14 +1765,16 @@ function bogo_day_rules(array $offer, string $day): ?array {
     return is_array($dayRules) ? $dayRules : null;
 }
 
-function matching_bogo_offer(array $paidLine, array $freeLine, ?DateTimeImmutable $now = null): ?array {
+function matching_bogo_offer(array $paidLine, array $freeLine, ?DateTimeImmutable $now = null, ?array $staffActor = null): ?array {
+    $staffPolicy = matching_staff_bogo_policy($paidLine,$freeLine,$staffActor);
+    if ($staffPolicy !== null) return $staffPolicy;
     $now = $now ?? restaurant_now();
     $day = strtolower($now->format('l'));
     $stmt = db()->prepare("SELECT * FROM offers WHERE is_active=1 AND offer_type='bogo' ORDER BY id DESC");
     $stmt->execute();
     foreach ($stmt->fetchAll() as $offer) {
         if (!offer_active_at($offer, $now)) continue;
-        if (!advanced_bogo_applies_to_line($offer, $paidLine) || !advanced_bogo_applies_to_line($offer, $freeLine)) continue;
+        if (!bogo_pair_products_allowed($offer, $paidLine, $freeLine)) continue;
         $paidSize = pizza_size_code($paidLine['variant']['name'] ?? '');
         $freeSize = pizza_size_code($freeLine['variant']['name'] ?? '');
         $dayRules = bogo_day_rules($offer, $day);
@@ -1719,7 +1800,10 @@ function handle_active_bogo_request(): void {
     } else {
         $now = restaurant_now();
     }
-    $day = strtolower($now->format('l'));
+    json_response(['offers' => active_bogo_offers($now), 'weekday' => strtolower($now->format('l')), 'as_of' => $asOf !== '' ? $now->format('Y-m-d H:i:s') : null]);
+}
+
+function active_bogo_offers(DateTimeImmutable $now): array {
     $stmt = db()->prepare("SELECT * FROM offers WHERE is_active=1 AND offer_type='bogo' ORDER BY id DESC");
     $stmt->execute();
     $offers = [];
@@ -1727,6 +1811,7 @@ function handle_active_bogo_request(): void {
         if (!offer_active_at($offer, $now)) continue;
         $categoryIds = json_int_list($offer['category_ids'] ?? '');
         $productIds = json_int_list($offer['product_ids'] ?? '');
+        $offer['free_product_ids'] = !$categoryIds && !$productIds && (int)($offer['free_product_id'] ?? 0) > 0 ? [(int)$offer['free_product_id']] : $productIds;
         if (!$categoryIds && !$productIds && ($offer['scope'] ?? '') === 'category' && (int)($offer['scope_id'] ?? 0) > 0) {
             $categoryIds = [(int)$offer['scope_id']];
         }
@@ -1735,13 +1820,14 @@ function handle_active_bogo_request(): void {
         }
         $offer['category_ids'] = $categoryIds;
         $offer['product_ids'] = $productIds;
+        if (!$offer['free_product_ids']) $offer['free_product_ids'] = $productIds;
         $offer['weekdays'] = json_string_list($offer['weekdays'] ?? '');
         $offer['size_rules'] = json_decode((string)($offer['size_rules'] ?? '{}'), true) ?: [];
-        unset($offer['scope_id'], $offer['buy_product_id'], $offer['free_product_id']);
         $offers[] = $offer;
     }
-    json_response(['offers' => $offers, 'weekday' => $day, 'as_of' => $asOf !== '' ? $now->format('Y-m-d H:i:s') : null]);
+    return $offers;
 }
+
 
 function advanced_bogo_applies_to_line(array $offer, array $line): bool {
     $item = $line['item'];
@@ -1753,15 +1839,25 @@ function advanced_bogo_applies_to_line(array $offer, array $line): bool {
     return (int)$item['category_id'] === (int)$offer['scope_id'];
 }
 
+function bogo_pair_products_allowed(array $offer, array $paid, array $free): bool {
+    if (json_int_list($offer['product_ids'] ?? '') || json_int_list($offer['category_ids'] ?? '')) {
+        return advanced_bogo_applies_to_line($offer, $paid) && advanced_bogo_applies_to_line($offer, $free);
+    }
+    $buyId = (int)($offer['buy_product_id'] ?? 0);
+    $freeId = (int)($offer['free_product_id'] ?? 0);
+    return ($buyId > 0 ? (int)$paid['item']['id'] === $buyId : advanced_bogo_applies_to_line($offer, $paid))
+        && ($freeId > 0 ? (int)$free['item']['id'] === $freeId : advanced_bogo_applies_to_line($offer, $free));
+}
+
 function advanced_bogo_discount(array $lines, float $subtotal): array {
-    $timezone = new DateTimeZone('Asia/Kolkata');
-    $now = new DateTimeImmutable('now', $timezone);
+    $now = restaurant_now();
     $day = strtolower($now->format('l'));
-    $stmt = db()->prepare("SELECT * FROM offers WHERE is_active=1 AND offer_type='bogo' AND (starts_at IS NULL OR starts_at <= NOW()) AND (expires_at IS NULL OR expires_at >= NOW()) ORDER BY id DESC");
+    $stmt = db()->prepare("SELECT * FROM offers WHERE is_active=1 AND offer_type='bogo' ORDER BY id DESC");
     $stmt->execute();
     $totalDiscount = 0.0;
     $details = [];
     foreach ($stmt->fetchAll() as $offer) {
+        if (!offer_active_at($offer, $now)) continue;
         $weekdays = json_string_list($offer['weekdays'] ?? '');
         if ($weekdays && !in_array($day, $weekdays, true)) continue;
         if (!offer_time_active($offer, $now)) continue;
@@ -1834,11 +1930,12 @@ function matching_bogo_offer_for_pair(array $paidLine, array $freeLine): ?array 
     return null;
 }
 
-function explicit_bogo_discount(array $lines, float $subtotal): array {
+function explicit_bogo_discount(array $lines, float $subtotal, ?array $staffActor = null): array {
     $bogoNow = restaurant_now();
     $paidByKey = [];
     $freeByParent = [];
     foreach ($lines as $line) {
+        if (!empty($line['is_manual_free'])) continue;
         if (!empty($line['is_bogo_free'])) {
             $freeByParent[(string)($line['bogo_parent_key'] ?? '')][] = $line;
         } else {
@@ -1848,16 +1945,17 @@ function explicit_bogo_discount(array $lines, float $subtotal): array {
     $discount = 0.0;
     $details = [];
     $bogoUsed = [];
+    $staffSnapshots = [];
     foreach ($freeByParent as $parentKey => $freeLines) {
         // Parent keys are linkage hints; per-line fallback pairing below re-resolves them so edited orders (with new keys) still validate strictly.
         $paidLine = $paidByKey[$parentKey] ?? null;
         $resolvedPaidKey = (string)$parentKey;
         // Free-quantity usage is tracked per resolved paid line in $bogoUsed.
         foreach ($freeLines as $freeLine) {
-            $offer = $paidLine ? matching_bogo_offer($paidLine, $freeLine, $bogoNow) : null;
+            $offer = $paidLine ? matching_bogo_offer($paidLine, $freeLine, $bogoNow, $staffActor) : null;
             if (!$offer) {
                 foreach ($paidByKey as $candidateKey => $candidate) {
-                    $candidateOffer = matching_bogo_offer($candidate, $freeLine, $bogoNow);
+                    $candidateOffer = matching_bogo_offer($candidate, $freeLine, $bogoNow, $staffActor);
                     if (!$candidateOffer) continue;
                     $candidateCap = bogo_allowed_free_qty($candidateOffer, (int)$candidate['quantity']);
                     if (($bogoUsed[(string)$candidateKey] ?? 0) + (int)$freeLine['quantity'] > $candidateCap) continue;
@@ -1873,6 +1971,7 @@ function explicit_bogo_discount(array $lines, float $subtotal): array {
             if (!$offer) json_response(['error' => 'Selected free pizza is not eligible for the paid pizza or current offer'], 422);
             $amount = money((float)$freeLine['unit_price'] * (int)$freeLine['quantity']);
             $discount += $amount;
+            if (!empty($offer['staff_always_available'])) $staffSnapshots[(string)$freeLine['client_key']] = ['policy'=>$offer,'parent_key'=>$resolvedPaidKey];
             $details[] = [
                 'offer_id' => (int)$offer['id'],
                 'offer_name' => (string)$offer['name'],
@@ -1886,7 +1985,7 @@ function explicit_bogo_discount(array $lines, float $subtotal): array {
             ];
         }
     }
-    return ['discount' => money(min($discount, $subtotal)), 'details' => $details];
+    return ['discount' => money(min($discount, $subtotal)), 'details' => $details, 'staff_snapshots'=>$staffSnapshots];
 }
 
 function active_staff_offers(): array {
@@ -1915,7 +2014,7 @@ function carried_staff_discount(array $lockedOrder, array $calc): array {
     if ($type === '' || $type === 'none') {
         return ['amount' => 0.0, 'type' => null, 'description' => null, 'value' => null, 'offer_id' => null];
     }
-    $subtotal = (float)$calc['subtotal'];
+    $subtotal = max(0,(float)$calc['subtotal'] - (float)($calc['discount'] ?? 0));
     if ($type === 'fixed') {
         $amount = money(min(max((float)($lockedOrder['staff_discount_value'] ?? 0), 0), $subtotal));
         if ($amount <= 0) return ['amount' => 0.0, 'type' => null, 'description' => null, 'value' => null, 'offer_id' => null];
@@ -1940,7 +2039,7 @@ function staff_discount_from_payload(array $data, array $calc): array {
     if ($type === '' || $type === 'none') {
         return ['amount' => 0.0, 'type' => null, 'description' => null, 'value' => null, 'offer_id' => null];
     }
-    $subtotal = (float)$calc['subtotal'];
+    $subtotal = max(0, (float)$calc['subtotal'] - (float)($calc['bogo_discount'] ?? 0) - (float)($calc['manual_free_discount'] ?? 0) - (float)($calc['coupon_discount'] ?? 0));
     if ($type === 'fixed') {
         $raw = $data['discount_amount'] ?? 0;
         if (!valid_decimal($raw)) json_response(['error' => 'Discount amount must be a valid number'], 422);
@@ -1961,13 +2060,14 @@ function staff_discount_from_payload(array $data, array $calc): array {
         return ['amount' => $amount, 'type' => 'percent', 'description' => $reason !== '' ? $reason : 'Staff percentage discount (' . $label . ')', 'value' => $percent, 'offer_id' => null];
     }
     if ($type === 'bogo') {
+        if ((float)($calc['bogo_discount'] ?? 0) > 0) json_response(['error' => 'A manual BOGO discount cannot be combined with selected free pizzas'], 422);
         $offerId = (int)($data['offer_id'] ?? 0);
         if ($offerId <= 0) json_response(['error' => 'Select a valid BOGO offer'], 422);
         $stmt = db()->prepare("SELECT o.*, buy.name AS buy_product_name, free.name AS free_product_name
             FROM offers o
             LEFT JOIN menu_items buy ON buy.id=COALESCE(o.buy_product_id, CASE WHEN o.scope='item' THEN o.scope_id ELSE NULL END)
             LEFT JOIN menu_items free ON free.id=COALESCE(o.free_product_id, CASE WHEN o.scope='item' THEN o.scope_id ELSE NULL END)
-            WHERE o.id=? AND o.is_active=1 AND (o.offer_type IS NULL OR o.offer_type='bogo') AND o.buy_qty > 0 AND o.get_qty > 0 AND (o.starts_at IS NULL OR o.starts_at <= NOW()) AND (o.expires_at IS NULL OR o.expires_at >= NOW()) LIMIT 1");
+            WHERE o.id=? AND o.is_active=1 AND (o.offer_type IS NULL OR o.offer_type='bogo') AND o.buy_qty > 0 AND o.get_qty > 0 LIMIT 1");
         $stmt->execute([$offerId]);
         $offer = $stmt->fetch();
         if (!$offer) json_response(['error' => 'BOGO offer is not active'], 422);
@@ -1977,6 +2077,7 @@ function staff_discount_from_payload(array $data, array $calc): array {
         $matchingBuyQty = 0;
         $freeLine = null;
         foreach ($calc['lines'] as $line) {
+            if (!empty($line['is_bogo_free']) || !empty($line['is_manual_free'])) continue;
             $item = $line['item'];
             $matchesBuy = $buyProductId > 0
                 ? (int)$item['id'] === $buyProductId
@@ -1990,7 +2091,7 @@ function staff_discount_from_payload(array $data, array $calc): array {
             $matchingBuyQty = 0;
             $freeLine = null;
             foreach ($calc['lines'] as $scopeLine) {
-                if (!empty($scopeLine['is_bogo_free'])) continue;
+                if (!empty($scopeLine['is_bogo_free']) || !empty($scopeLine['is_manual_free'])) continue;
                 if (!advanced_bogo_applies_to_line($offer, $scopeLine)) continue;
                 $matchingBuyQty += (int)$scopeLine['quantity'];
                 if ($freeLine === null) $freeLine = $scopeLine;
@@ -2001,7 +2102,7 @@ function staff_discount_from_payload(array $data, array $calc): array {
         if (!$freeLine) json_response(['error' => 'Cart must include the free item product to apply this BOGO offer'], 422);
         $maxPaidUnitPrice = 0.0;
         foreach ($calc['lines'] as $paidCandidate) {
-            if (!empty($paidCandidate['is_bogo_free'])) continue;
+            if (!empty($paidCandidate['is_bogo_free']) || !empty($paidCandidate['is_manual_free'])) continue;
             $maxPaidUnitPrice = max($maxPaidUnitPrice, (float)$paidCandidate['unit_price']);
         }
         if ((float)$freeLine['unit_price'] > $maxPaidUnitPrice) json_response(['error' => 'BOGO free item price cannot exceed the paid item price'], 422);
@@ -2010,7 +2111,7 @@ function staff_discount_from_payload(array $data, array $calc): array {
             $freeSizeCode = pizza_size_code($freeLine['variant']['name'] ?? '');
             $sizePairAllowed = false;
             foreach ($calc['lines'] as $paidCandidate) {
-                if (!empty($paidCandidate['is_bogo_free'])) continue;
+                if (!empty($paidCandidate['is_bogo_free']) || !empty($paidCandidate['is_manual_free'])) continue;
                 $paidSizeCode = pizza_size_code($paidCandidate['variant']['name'] ?? '');
                 if (isset($bogoDayRules[$paidSizeCode]) && trim((string)$bogoDayRules[$paidSizeCode]) !== '' && pizza_size_code((string)$bogoDayRules[$paidSizeCode]) === $freeSizeCode) {
                     $sizePairAllowed = true;
@@ -2046,28 +2147,42 @@ function effective_product_unit_price(array $product, ?array $variant = null): f
     return $productPrice;
 }
 
-function calculate_cart(array $items, ?string $couponCode, ?int $userId, ?float $lat, ?float $lng, string $orderType = 'delivery', bool $applyAutomaticBogo = true): array {
+function calculate_cart(array $items, ?string $couponCode, ?int $userId, ?float $lat, ?float $lng, string $orderType = 'delivery', bool $applyAutomaticBogo = true, ?array $staffActor = null): array {
+    // Every line in this calculation uses one consistent saved Staff policy.
+    if ($staffActor !== null) $staffActor['__staff_bogo_policy'] = staff_everyday_bogo_offer();
     if (!in_array($orderType, ['delivery', 'takeaway', 'dine_in'], true)) {
         json_response(['error' => 'Invalid order type'], 422);
     }
     if (!$items) json_response(['error' => 'Cart is empty'], 422);
     $ids = array_values(array_unique(array_map(fn($i) => (int)($i['id'] ?? 0), $items)));
     $placeholders = implode(',', array_fill(0, count($ids), '?'));
-    $stmt = db()->prepare("SELECT * FROM menu_items WHERE id IN ($placeholders) AND is_active=1");
+    $stmt = db()->prepare("SELECT * FROM menu_items WHERE id IN ($placeholders)");
     $stmt->execute($ids);
     $products = [];
     foreach ($stmt->fetchAll() as $row) $products[(int)$row['id']] = $row;
     $lines = [];
     $subtotal = 0.0;
+    $paidKeys = [];
+    $allKeys = [];
+    $stockUsed = [];
     foreach ($items as $cartItem) {
         $id = (int)($cartItem['id'] ?? 0);
-        $qty = max(1, (int)($cartItem['quantity'] ?? 1));
+        $rawQty = $cartItem['quantity'] ?? 1;
+        if (filter_var($rawQty, FILTER_VALIDATE_INT) === false || (int)$rawQty < 1 || (int)$rawQty > 10000) json_response(['error' => 'Invalid item quantity'], 422);
+        $qty = (int)$rawQty;
         $isBogoFree = !empty($cartItem['is_bogo_free']);
+        $isManualFree = !empty($cartItem['is_manual_free']);
+        if ($isManualFree && $staffActor === null) json_response(['error' => 'Manual free pizzas are only available in authorized staff orders'], 403);
+        if ($isManualFree && $isBogoFree) json_response(['error'=>'A free item cannot combine automatic and staff promotions'],422);
         if (!isset($products[$id])) json_response(['error' => 'Invalid menu item'], 422);
         $product = $products[$id];
+        if (array_key_exists('__historical_name',$cartItem)) $product['name'] = $cartItem['__historical_name'];
+        if (!(int)$product['is_active'] && (!array_key_exists('__historical_unit',$cartItem) || $qty > (int)($cartItem['__historical_quantity'] ?? 0))) json_response(['error'=>'Invalid menu item'],422);
         $variant = null;
         $variantId = isset($cartItem['variant_id']) ? (int)$cartItem['variant_id'] : 0;
-        if ($variantId > 0) {
+        if (array_key_exists('__historical_unit',$cartItem)) {
+            $variant = $cartItem['__historical_variant'];
+        } elseif ($variantId > 0) {
             $variantStmt = db()->prepare('SELECT * FROM menu_item_variants WHERE id=? AND menu_item_id=? AND is_active=1 LIMIT 1');
             $variantStmt->execute([$variantId, $id]);
             $variant = $variantStmt->fetch();
@@ -2078,34 +2193,46 @@ function calculate_cart(array $items, ?string $couponCode, ?int $userId, ?float 
                 $variantStmt->execute([$id]);
                 $variant = $variantStmt->fetch() ?: null;
             } catch (Throwable $e) {
+                security_log_exception($e, 'default product variant');
                 $variant = null;
             }
         }
         $unitPrice = effective_product_unit_price($product, $variant);
         $selectedOptions = [];
         $optionTotal = 0.0;
-        $optionIds = array_values(array_unique(array_map('intval', $cartItem['option_ids'] ?? [])));
-        if ($optionIds) {
+        $optionQuantities = selected_option_quantities($cartItem);
+        $optionIds = array_keys($optionQuantities);
+        if (array_key_exists('__historical_unit', $cartItem)) {
+            $selectedOptions = $cartItem['__historical_options'];
+        } elseif ($optionIds) {
             $optionPlaceholders = implode(',', array_fill(0, count($optionIds), '?'));
             $optionStmt = db()->prepare("SELECT o.*, g.name AS group_name FROM menu_item_options o JOIN menu_option_groups g ON g.id=o.group_id WHERE o.id IN ($optionPlaceholders) AND o.is_active=1 AND g.is_active=1");
             $optionStmt->execute($optionIds);
             $options = $optionStmt->fetchAll();
             if (count($options) !== count($optionIds)) json_response(['error' => 'Invalid menu option'], 422);
             foreach ($options as $option) {
-                if (($option['applies_to'] ?? 'pizza') === 'pizza' && !in_array((string)($variant['name'] ?? ''), ['S', 'M', 'L'], true)) {
-                    json_response(['error' => 'Selected option is only available for pizzas'], 422);
-                }
+                if (!option_applies_to_product($option, $product, $variant)) json_response(['error' => 'Selected topping or add-on is not available for this product'], 422);
                 $optionPrice = option_price_for_variant($option, (string)($variant['name'] ?? 'Regular'));
-                $optionTotal += $optionPrice;
-                $selectedOptions[] = ['id' => (int)$option['id'], 'name' => $option['name'], 'group_name' => $option['group_name'], 'price' => money($optionPrice)];
+                $optionQuantity = $optionQuantities[(int)$option['id']];
+                $optionTotal += $optionPrice * $optionQuantity;
+                $selectedOptions[] = ['id' => (int)$option['id'], 'name' => $option['name'], 'group_name' => $option['group_name'], 'price' => money($optionPrice), 'quantity' => $optionQuantity, 'line_total'=>money($optionPrice * $optionQuantity)];
             }
         }
         $free = 0;
-        if ((int)$product['stock'] < $qty + $free) json_response(['error' => $product['name'] . ' does not have enough stock'], 422);
-        $actualUnitPrice = money($unitPrice + $optionTotal);
+        $stockUsed[$id] = ($stockUsed[$id] ?? 0) + $qty;
+        if ((int)$product['stock'] < $stockUsed[$id]) json_response(['error' => $product['name'] . ' does not have enough stock'], 422);
+        $actualUnitPrice = money($cartItem['__historical_unit'] ?? ($unitPrice + $optionTotal));
         $lineTotal = money($actualUnitPrice * $qty);
         $subtotal += $lineTotal;
         $clientKey = (string)($cartItem['client_key'] ?? $cartItem['bogo_group_id'] ?? ($id . ':' . ($variant['id'] ?? '') . ':' . implode('.', $optionIds)));
+        if ($isManualFree && empty($cartItem['client_key'])) json_response(['error'=>'Manual free pizza requires a unique item key'],422);
+        if ($isBogoFree && empty($cartItem['client_key'])) $clientKey .= ':bogo-free:' . count($lines);
+        if (isset($allKeys[$clientKey])) json_response(['error' => 'Duplicate item key; combine quantities or create a distinct line'], 422);
+        $allKeys[$clientKey] = true;
+        if (!$isBogoFree && !$isManualFree) {
+            if (isset($paidKeys[$clientKey])) json_response(['error' => 'Duplicate paid item key; combine its quantities'], 422);
+            $paidKeys[$clientKey] = true;
+        }
         $bogoParentKey = (string)($cartItem['bogo_parent_key'] ?? $cartItem['bogo_group_id'] ?? '');
         $lines[] = [
             'item' => $product,
@@ -2118,11 +2245,27 @@ function calculate_cart(array $items, ?string $couponCode, ?int $userId, ?float 
             'is_bogo_free' => $isBogoFree,
             'bogo_parent_key' => $bogoParentKey,
             'client_key' => $clientKey,
+            'is_manual_free' => $isManualFree,
+            'manual_parent_key' => (string)($cartItem['manual_parent_key'] ?? ''),
+            'manual_applied_by' => (int)($cartItem['__manual_actor'] ?? ($staffActor['id'] ?? 0)),
+            '__historical_staff_bogo_policy' => $staffActor === null ? null : ($cartItem['__historical_staff_bogo_policy'] ?? null),
+            '__historical_staff_bogo_parent' => $staffActor === null ? null : ($cartItem['__historical_staff_bogo_parent'] ?? null),
         ];
     }
-    $bogo = $applyAutomaticBogo ? explicit_bogo_discount($lines, $subtotal) : ['discount' => 0.0, 'details' => []];
+    $bogo = $applyAutomaticBogo ? explicit_bogo_discount($lines, $subtotal, $staffActor) : ['discount' => 0.0, 'details' => []];
+    foreach ($lines as &$line) {
+        $staffSnapshot = $bogo['staff_snapshots'][$line['client_key']] ?? null;
+        if ($staffSnapshot !== null) {
+            $line['staff_bogo_policy'] = $staffSnapshot['policy'];
+            $line['bogo_parent_key'] = $staffSnapshot['parent_key'];
+        }
+        unset($line['__historical_staff_bogo_policy'],$line['__historical_staff_bogo_parent']);
+    }
+    unset($line);
+    $manualFree = $staffActor === null ? ['discount'=>0.0,'details'=>[]] : manual_free_discount($lines, $staffActor);
     $coupon = active_coupon($couponCode, $subtotal, $userId);
-    $totalDiscount = money((float)$coupon['discount'] + (float)$bogo['discount']);
+    $coupon['discount'] = money(min((float)$coupon['discount'], max(0, $subtotal - (float)$bogo['discount'] - (float)$manualFree['discount'])));
+    $totalDiscount = money((float)$coupon['discount'] + (float)$bogo['discount'] + (float)$manualFree['discount']);
     $delivery = ['distance_km' => null, 'delivery_charge' => 0.0, 'slab' => null];
     if ($orderType === 'delivery') {
         if ($lat === null || $lng === null) json_response(['error' => 'Delivery coordinates are required'], 422);
@@ -2141,8 +2284,9 @@ function calculate_cart(array $items, ?string $couponCode, ?int $userId, ?float 
         'coupon_discount' => $coupon['discount'],
         'bogo_discount' => $bogo['discount'],
         'bogo_details' => $bogo['details'],
-        'discount_type' => $bogo['discount'] > 0 && $coupon['discount'] > 0 ? 'coupon,bogo' : ($bogo['discount'] > 0 ? 'bogo' : ($coupon['discount'] > 0 ? 'coupon' : null)),
-        'discount_description' => $bogo['details'] ? implode('; ', array_map(fn($row) => $row['offer_name'] . ': ' . $row['free_quantity'] . ' x ' . $row['item'] . ' ' . $row['size'] . ' free', $bogo['details'])) : null,
+        'manual_free_discount' => $manualFree['discount'],
+        'discount_type' => implode(',',array_filter([$bogo['discount'] > 0 ? 'bogo' : null,$coupon['discount'] > 0 ? 'coupon' : null,$manualFree['discount'] > 0 ? 'manual_free' : null])) ?: null,
+        'discount_description' => discount_description_text(implode('; ',array_merge(array_map(fn($row) => $row['offer_name'] . ': ' . $row['free_quantity'] . ' x ' . $row['item'] . ' ' . $row['size'] . ' free', $bogo['details']),array_map(fn($row) => 'Staff free pizza: ' . $row['quantity'] . ' x ' . $row['item'] . ' ' . $row['size'], $manualFree['details'])))),
         'coupon' => $coupon['coupon'],
         'delivery' => $delivery,
         'total' => $total
@@ -2283,7 +2427,7 @@ function invoice_payload(array $order): array {
     $items = db()->prepare('SELECT * FROM order_items WHERE order_id=? ORDER BY id');
     $items->execute([$order['id']]);
     return [
-        'settings' => settings(),
+        'settings' => sanitized_settings(settings()),
         'order' => public_order($order),
         'items' => array_map('public_order_item', $items->fetchAll()),
     ];
@@ -2304,7 +2448,7 @@ function normalized_edit_items(array $items): array {
         if ($quantity < 1) {
             json_response(['error' => 'Quantity must be at least 1. Remove the item instead.'], 422);
         }
-        return [
+        $normalized = [
             'id' => (int)($item['id'] ?? $item['menu_item_id'] ?? 0),
             'variant_id' => isset($item['variant_id']) && $item['variant_id'] !== '' ? (int)$item['variant_id'] : null,
             'option_ids' => array_values(array_unique(array_map('intval', is_array($item['option_ids'] ?? null) ? $item['option_ids'] : []))),
@@ -2312,7 +2456,12 @@ function normalized_edit_items(array $items): array {
             'client_key' => (string)($item['client_key'] ?? ''),
             'is_bogo_free' => !empty($item['is_bogo_free']),
             'bogo_parent_key' => (string)($item['bogo_parent_key'] ?? ''),
+            'is_manual_free' => !empty($item['is_manual_free']),
+            'manual_parent_key' => (string)($item['manual_parent_key'] ?? ''),
+            'order_item_id' => $item['order_item_id'] ?? null,
         ];
+        if (array_key_exists('option_selections',$item)) $normalized['option_selections'] = $item['option_selections'];
+        return $normalized;
     }, $items);
 }
 
@@ -2455,31 +2604,39 @@ function apply_order_item_edit(array $order, array $items, int $actorId, string 
         }
         $newTableNumber = $newOrderType === 'dine_in' ? trim((string)($metaInput['table_number'] ?? ($lockedOrder['table_number'] ?? ''))) : null;
         $itemsCalcType = $newOrderType === 'delivery' ? 'takeaway' : $newOrderType;
-        $calc = calculate_cart($items, $couponCode, $lockedOrder['user_id'] ? (int)$lockedOrder['user_id'] : null, null, null, $itemsCalcType);
+        $staffActor = ($lockedOrder['source'] ?? '') === 'staff_offline' ? ['id'=>$actorId,'role'=>$actorLabel === 'admin' ? 'admin' : 'staff'] : null;
+        if ($staffActor !== null) $items = prepare_staff_cart_items($items,$staffActor,$oldItems);
+        $calc = calculate_cart($items, $couponCode, $lockedOrder['user_id'] ? (int)$lockedOrder['user_id'] : null, null, null, $itemsCalcType,true,$staffActor);
         $editStaffDiscount = is_array($discountInput) && array_key_exists('discount_type', $discountInput)
             ? staff_discount_from_payload($discountInput, $calc)
             : carried_staff_discount($lockedOrder, $calc);
         $calc['discount'] = money((float)$calc['discount'] + (float)$editStaffDiscount['amount']);
         $calc['discount_type'] = implode(',', array_filter([$calc['discount_type'] ?? null, $editStaffDiscount['type'] ?? null])) ?: null;
-        $calc['discount_description'] = implode('; ', array_filter([$calc['discount_description'] ?? null, $editStaffDiscount['description'] ?? null])) ?: null;
+        $calc['discount_description'] = discount_description_text(implode('; ', array_filter([$calc['discount_description'] ?? null, $editStaffDiscount['description'] ?? null])));
         $newDeliveryAddress = null;
         $newDeliveryLat = null;
         $newDeliveryLng = null;
         $newDeliveryDistanceKm = null;
         $newDeliveryCharge = 0.0;
+        $staffDeliverySnapshot = null;
         if ($newOrderType === 'delivery') {
             $newDeliveryAddress = array_key_exists('delivery_address', $metaInput) ? trim((string)$metaInput['delivery_address']) : trim((string)($lockedOrder['delivery_address'] ?? ''));
             if ($newDeliveryAddress === '') {
                 throw new ApiException('Delivery address is required', 422);
             }
-            $editLat = array_key_exists('latitude', $metaInput) ? $metaInput['latitude'] : $lockedOrder['latitude'];
-            $editLng = array_key_exists('longitude', $metaInput) ? $metaInput['longitude'] : $lockedOrder['longitude'];
-            $editDistance = array_key_exists('distance_km', $metaInput) ? $metaInput['distance_km'] : $lockedOrder['distance_km'];
-            $resolvedEditDelivery = delivery_for_staff_order(money((float)$calc['subtotal'] - (float)$calc['discount']), $editLat, $editLng, $editDistance);
-            $newDeliveryLat = $resolvedEditDelivery['lat'];
-            $newDeliveryLng = $resolvedEditDelivery['lng'];
-            $newDeliveryDistanceKm = $resolvedEditDelivery['distance_km'];
-            $newDeliveryCharge = (float)$resolvedEditDelivery['delivery']['delivery_charge'];
+            if ($staffActor !== null) {
+                $staffDeliverySnapshot = staff_delivery_for_edit($lockedOrder,$metaInput,money((float)$calc['subtotal'] - (float)$calc['discount']));
+                $newDeliveryCharge = $staffDeliverySnapshot === null ? (float)$lockedOrder['delivery_charge'] : (float)$staffDeliverySnapshot['charge'];
+                // Existing coordinates are retained as historical data; Staff never needs to enter them.
+                $newDeliveryLat = $lockedOrder['latitude']; $newDeliveryLng = $lockedOrder['longitude']; $newDeliveryDistanceKm = $lockedOrder['distance_km'];
+            } else {
+                $editLat = array_key_exists('latitude', $metaInput) ? $metaInput['latitude'] : $lockedOrder['latitude'];
+                $editLng = array_key_exists('longitude', $metaInput) ? $metaInput['longitude'] : $lockedOrder['longitude'];
+                $editDistance = array_key_exists('distance_km', $metaInput) ? $metaInput['distance_km'] : $lockedOrder['distance_km'];
+                $resolvedEditDelivery = delivery_for_staff_order(money((float)$calc['subtotal'] - (float)$calc['discount']), $editLat, $editLng, $editDistance);
+                $newDeliveryLat = $resolvedEditDelivery['lat']; $newDeliveryLng = $resolvedEditDelivery['lng']; $newDeliveryDistanceKm = $resolvedEditDelivery['distance_km'];
+                $newDeliveryCharge = (float)$resolvedEditDelivery['delivery']['delivery_charge'];
+            }
         }
         $calc['total'] = money(max((float)$calc['subtotal'] - (float)$calc['discount'] + $newDeliveryCharge, 0));
         enforce_coupon_limit_locked($calc['coupon'], $lockedOrder['user_id'] ? (int)$lockedOrder['user_id'] : null);
@@ -2570,6 +2727,12 @@ function apply_order_item_edit(array $order, array $items, int $actorId, string 
             }
         }
         $pdo->prepare('INSERT INTO order_status_history (order_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)')->execute([$lockedOrder['id'], $lockedOrder['status'], $lockedOrder['status'], $actorId]);
+        if ($staffActor !== null) {
+            $pdo->prepare('UPDATE orders SET staff_delivery_slab_id=?,staff_delivery_snapshot=? WHERE id=?')->execute([$staffDeliverySnapshot['id'] ?? null,$staffDeliverySnapshot === null ? null : json_encode($staffDeliverySnapshot,JSON_UNESCAPED_SLASHES),$lockedOrder['id']]);
+            $previousAdjustment = !empty($lockedOrder['staff_delivery_snapshot']);
+            foreach ($oldItems as $oldItem) if (!empty(decoded_item_options($oldItem['options_snapshot'] ?? null)['manual_free']['is_free'])) $previousAdjustment = true;
+            audit_staff_adjustments((int)$lockedOrder['id'],$actorId,'order_edited',$calc,$staffDeliverySnapshot,$previousAdjustment);
+        }
         $pdo->commit();
     } catch (ApiException $e) {
         $pdo->rollBack();
@@ -2648,15 +2811,18 @@ function invoice_pdf_bytes(array $order): string {
         $title = $item['name_snapshot'];
         if (!empty($item['variant_label'])) $title .= ' - ' . $item['variant_label'];
         if (!empty($item['is_bogo_free'])) $title .= ' (BOGO FREE)';
+        if (!empty($item['is_manual_free'])) $title .= ' (STAFF FREE)';
         $lines[] = $title;
         if (!empty($item['options_display'])) $lines[] = '  ' . $item['options_display'];
-        $lineAmount = !empty($item['is_bogo_free']) ? 'FREE (original INR ' . number_format((float)$item['unit_price'], 2) . ')' : 'INR ' . number_format((float)$item['line_total'], 2);
+        $lineAmount = (!empty($item['is_bogo_free']) || !empty($item['is_manual_free'])) ? 'FREE (original INR ' . number_format((float)$item['unit_price'], 2) . ')' : 'INR ' . number_format((float)$item['line_total'], 2);
         $lines[] = '  Qty: ' . $item['quantity'] . ' | Unit: INR ' . number_format((float)$item['unit_price'], 2) . ' | Line: ' . $lineAmount;
+        if (!empty($item['is_manual_free'])) $lines[] = '  Staff free-item discount: INR ' . number_format((float)$item['manual_free_discount'],2);
         if ((int)$item['free_quantity'] > 0) $lines[] = '  Free quantity: ' . $item['free_quantity'];
     }
     $lines[] = str_repeat('-', 72);
     $lines[] = 'Subtotal: INR ' . number_format((float)$order['subtotal'], 2);
     $lines[] = 'Delivery Charge: INR ' . number_format((float)$order['delivery_charge'], 2);
+    if (!empty($order['staff_delivery_snapshot']['name'])) $lines[] = 'Staff Delivery: ' . $order['staff_delivery_snapshot']['name'];
     $lines[] = 'Discount: INR ' . number_format((float)$order['discount_amount'], 2);
     if (!empty($order['discount_type'])) {
         $lines[] = 'Discount Type: ' . strtoupper((string)$order['discount_type']);
@@ -2702,7 +2868,8 @@ function send_invoice_email(array $order, bool $manual = false): array {
     $from = env('MAIL_FROM_EMAIL', env('SMTP_FROM_EMAIL', ''));
     if ($from === '' || !filter_var($from, FILTER_VALIDATE_EMAIL)) {
         log_invoice_email((int)$order['id'], $recipient, 'skipped', 'MAIL_FROM_EMAIL is not configured');
-        return ['ok' => false, 'status' => 'skipped', 'error' => 'MAIL_FROM_EMAIL is not configured'];
+        error_log('[The Pizza House] Invoice email skipped: configure a valid MAIL_FROM_EMAIL and the hosting mail transport.');
+        return ['ok' => false, 'status' => 'skipped', 'error' => 'Invoice email is currently unavailable. Please try again later.'];
     }
     $boundary = 'TPH-' . bin2hex(random_bytes(12));
     $subject = 'The Pizza House invoice for ' . $order['order_number'];
@@ -2716,12 +2883,16 @@ function send_invoice_email(array $order, bool $manual = false): array {
     ];
     $body = "--$boundary\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n$message\r\n";
     $body .= "--$boundary\r\nContent-Type: application/pdf; name=\"$filename\"\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename=\"$filename\"\r\n\r\n$pdf\r\n--$boundary--";
-    $sent = @mail($recipient, $subject, $body, implode("\r\n", $headers));
-    log_invoice_email((int)$order['id'], $recipient, $sent ? 'sent' : 'failed', $sent ? null : 'PHP mail() returned false');
+    $transport = invoice_mail_transport($recipient, $subject, $body, implode("\r\n", $headers));
+    $sent = $transport['accepted'];
+    $reference = $transport['request_id'];
+    // The legacy database status "sent" means transport acceptance, never a
+    // delivery receipt. The response makes this distinction explicit.
+    log_invoice_email((int)$order['id'], $recipient, $sent ? 'sent' : 'failed', $sent ? null : 'Mail transport failed; reference ' . $reference);
     if ($manual && !$sent) {
-        json_response(['error' => 'Invoice email could not be sent. Check MAIL_FROM_EMAIL and server mail configuration.'], 503);
+        json_response(['error' => 'Invoice email could not be sent. Please try again later.', 'request_id' => $reference], 503);
     }
-    return ['ok' => $sent, 'status' => $sent ? 'sent' : 'failed', 'error' => $sent ? null : 'PHP mail() returned false'];
+    return invoice_mail_result($sent);
 }
 
 function queue_invoice_email_after_order(int $orderId): void {
@@ -2731,9 +2902,11 @@ function queue_invoice_email_after_order(int $orderId): void {
             send_invoice_email($order);
         }
     } catch (Throwable $e) {
+        $reference = security_log_exception($e, 'invoice email');
         try {
-            log_invoice_email($orderId, 'unknown', 'failed', $e->getMessage());
+            log_invoice_email($orderId, 'unknown', 'failed', 'Email failed; reference ' . $reference);
         } catch (Throwable $ignored) {
+            security_log_exception($ignored, 'invoice email status');
         }
     }
 }
@@ -2742,7 +2915,7 @@ function upsert_setting_table(string $table, array $values): array {
     $allowed = $table === 'theme_settings' ? array_keys(theme()) : array_keys(settings());
     foreach ($values as $key => $value) {
         if (!in_array($key, $allowed, true)) continue;
-        if ($table === 'settings' && in_array($key, ['razorpay_key_id','razorpay_key_secret','google_maps_api_key'], true)) continue;
+        if ($table === 'settings' && in_array($key, ['razorpay_key_id','razorpay_key_secret','google_maps_api_key','staff_bogo_policy'], true)) continue;
         if ($table === 'theme_settings') {
             validate_theme_value($key, (string)$value);
         } else {
@@ -2772,7 +2945,7 @@ function validate_theme_value(string $key, string $value): void {
     if ($key === 'font_family' && !preg_match('/^[A-Za-z0-9\s,"\-]+$/', $value)) {
         json_response(['error' => 'Invalid font family'], 422);
     }
-    if (in_array($key, ['logo_url', 'favicon_url'], true) && $value !== '' && !filter_var($value, FILTER_VALIDATE_URL)) {
+    if (in_array($key, ['logo_url', 'favicon_url'], true) && $value !== '' && !preg_match('#^uploads/products/[A-Za-z0-9_-]+\.(jpg|png|webp)$#D', $value) && !(filter_var($value, FILTER_VALIDATE_URL) && in_array(strtolower((string)parse_url($value, PHP_URL_SCHEME)), ['http','https'], true))) {
         json_response(['error' => "Invalid URL for $key"], 422);
     }
 }
@@ -3040,9 +3213,16 @@ function normalize_delivery_slab_payload(array $payload): array {
     return $payload;
 }
 
+
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $path = route_path();
+header('X-Content-Type-Options: nosniff');
+header('Cache-Control: no-store');
+security_rate_before($path);
 $data = input();
+security_validate_request($path,$method,$data);
+security_rate_account($path,$data);
+if (str_starts_with($path,'/uploads/') && $method === 'GET') serve_private_upload($path);
 
 if ($path === '/health') json_response(['ok' => true, 'time' => date(DATE_ATOM)]);
 if ($path === '/health/db') {
@@ -3052,10 +3232,7 @@ if ($path === '/health/db') {
     } catch (Throwable $e) {
         error_log('[The Pizza House] Database health check failed: ' . $e->getMessage());
         error_log('[The Pizza House] Database config diagnostics: ' . json_encode(safe_db_diagnostics()));
-        $payload = ['ok' => false, 'database' => 'unavailable', 'diagnostics' => safe_db_diagnostics()];
-        if (getenv('APP_ENV') === 'local') {
-            $payload['detail'] = $e->getMessage();
-        }
+        $payload = ['ok' => false, 'database' => 'unavailable'];
         json_response($payload, 503);
     }
 }
@@ -3118,6 +3295,8 @@ if ($path === '/auth/register' && $method === 'POST') {
     try {
         $stmt->execute([trim($data['name']), trim($data['phone']), strtolower(trim($data['email'])), password_hash($data['password'], PASSWORD_DEFAULT)]);
     } catch (PDOException $e) {
+        if (($e->errorInfo[1] ?? null) !== 1062) throw $e;
+        security_log_exception($e, 'duplicate customer');
         json_response(['error' => 'A customer account with this email already exists'], 422);
     }
     $id = (int)db()->lastInsertId();
@@ -3222,6 +3401,7 @@ if ($path === '/menu' && $method === 'GET') {
             $variants[(int)$variant['menu_item_id']][] = $variant;
         }
     } catch (Throwable $e) {
+        security_log_exception($e, 'menu variants');
         $variants = [];
     }
     $items = array_map(function (array $item) use ($variants): array {
@@ -3232,7 +3412,9 @@ if ($path === '/menu' && $method === 'GET') {
     try {
         $groups = db()->query('SELECT id, name, slug, sort_order, is_active FROM menu_option_groups WHERE is_active=1 ORDER BY sort_order, name')->fetchAll();
         $optionsByGroup = [];
-        foreach (db()->query('SELECT id, group_id, name, slug, small_price, medium_price, large_price, fixed_price, applies_to, is_active FROM menu_item_options WHERE is_active=1 ORDER BY group_id, name')->fetchAll() as $option) {
+        foreach (db()->query('SELECT id, group_id, name, slug, small_price, medium_price, large_price, fixed_price, applies_to, category_ids, product_ids, is_active FROM menu_item_options WHERE is_active=1 ORDER BY group_id, name')->fetchAll() as $option) {
+            $option['category_ids'] = json_int_list($option['category_ids'] ?? '');
+            $option['product_ids'] = json_int_list($option['product_ids'] ?? '');
             $optionsByGroup[(int)$option['group_id']][] = $option;
         }
         foreach ($groups as $group) {
@@ -3240,12 +3422,14 @@ if ($path === '/menu' && $method === 'GET') {
             $optionGroups[] = $group;
         }
     } catch (Throwable $e) {
+        security_log_exception($e, 'menu option groups');
         $optionGroups = [];
     }
     $menuVersion = null;
     try {
         $menuVersion = db()->query("SELECT GREATEST(COALESCE((SELECT MAX(updated_at) FROM menu_items), '2000-01-01 00:00:00'), COALESCE((SELECT MAX(updated_at) FROM menu_item_variants), '2000-01-01 00:00:00'))")->fetchColumn() ?: null;
     } catch (Throwable $e) {
+        security_log_exception($e, 'menu version');
         $menuVersion = null;
     }
     json_response(['categories' => $categories, 'items' => $items, 'option_groups' => $optionGroups, 'menu_version' => $menuVersion]);
@@ -3333,7 +3517,7 @@ if ($path === '/orders' && $method === 'POST') {
     try {
         enforce_coupon_limit_locked($calc['coupon'], $user ? (int)$user['id'] : null);
         $orderNumber = 'TPH-' . date('Ymd') . '-' . strtoupper(bin2hex(random_bytes(3)));
-        $stmt = $pdo->prepare('INSERT INTO orders (order_number, user_id, guest_name, guest_phone, guest_email, order_type, subtotal, discount_amount, discount_type, discount_description, delivery_charge, total_amount, coupon_id, delivery_address, latitude, longitude, distance_km, payment_mode, payment_status, paid_amount, remaining_amount, idempotency_key, guest_access_token_hash, guest_access_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY))');
+        $stmt = $pdo->prepare("INSERT INTO orders (order_number, user_id, guest_name, guest_phone, guest_email, order_type, subtotal, discount_amount, discount_type, discount_description, delivery_charge, total_amount, coupon_id, delivery_address, latitude, longitude, distance_km, payment_mode, payment_status, paid_amount, remaining_amount, idempotency_key, guest_access_token_hash, guest_access_expires_at, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY), 'customer_online')");
         $stmt->execute([$orderNumber, $user['id'] ?? null, $guest['name'] ?? null, $guest['phone'] ?? null, $guest['email'] ?? null, $orderType, $calc['subtotal'], $calc['discount'], $calc['discount_type'], $calc['discount_description'], $calc['delivery']['delivery_charge'], $calc['total'], $calc['coupon']['id'] ?? null, $deliveryAddress, $lat, $lng, $calc['delivery']['distance_km'], $data['payment_mode'], $payable['status'], $calc['total'], $idempotency, $guestAccessToken ? hash('sha256', $guestAccessToken) : null]);
         $orderId = (int)$pdo->lastInsertId();
         foreach ($calc['lines'] as $line) {
@@ -3522,16 +3706,29 @@ if ($path === '/staff/dashboard' && $method === 'GET') {
     }
     $currentOrders = [];
     if (!empty($permissions['view_current_orders'])) {
-        $currentStmt = db()->prepare("SELECT id, order_number, guest_name AS customer_name, guest_phone AS customer_phone, order_type, source, status, total_amount, delivery_charge, delivery_address, payment_status, paid_amount, remaining_amount, payment_method, table_number, created_at FROM orders WHERE staff_id=? AND status NOT IN ('delivered','cancelled') ORDER BY created_at DESC LIMIT 30");
+        $currentStmt = db()->prepare("SELECT o.id, o.order_number, COALESCE(o.guest_name,u.name) AS customer_name, COALESCE(o.guest_phone,u.phone) AS customer_phone, o.order_type, o.source, o.status, o.total_amount, o.delivery_charge, o.delivery_address, o.payment_status, o.paid_amount, o.remaining_amount, o.payment_method, o.table_number, o.created_at FROM orders o LEFT JOIN users u ON u.id=o.user_id WHERE (o.staff_id=? OR (o.source='customer_online' AND o.payment_status IN ('Paid','Partially Paid','COD'))) AND o.status NOT IN ('delivered','cancelled') ORDER BY o.created_at DESC LIMIT 100");
         $currentStmt->execute([$staff['id']]);
         $currentOrders = $currentStmt->fetchAll();
     }
-    json_response(['today' => ['date' => $todayDate, 'orders' => $todayOrders], 'current_orders' => $currentOrders, 'permissions' => $permissions]);
+    json_response(['today' => ['date' => $todayDate, 'orders' => $todayOrders], 'current_orders' => $currentOrders, 'online_alerts' => array_values(array_filter($currentOrders, fn($order) => $order['source'] === 'customer_online' && order_is_admin_alertable($order))), 'permissions' => $permissions]);
+}
+
+if ($path === '/staff/bogo-policy') {
+    $actor = current_user(true);
+    if (!in_array($actor['role'] ?? '',['staff','admin'],true)) json_response(['error'=>'Forbidden'],403);
+    if ($method === 'GET') json_response([...staff_bogo_policy_record(),'can_manage'=>staff_can_manage_bogo($actor)]);
+    if ($method === 'PUT') json_response(save_staff_bogo_policy($actor,$data['policy'],$data['revision']));
+    json_response(['error'=>'Method not allowed'],405);
 }
 
 if ($path === '/staff/offers' && $method === 'GET') {
     current_user(true, 'staff');
-    json_response(['offers' => active_staff_offers()]);
+    $now = restaurant_now();
+    json_response([
+        'offers' => active_staff_offers(),
+        'bogo_offers' => array_merge([staff_everyday_bogo_offer()], active_bogo_offers($now)),
+        'weekday' => strtolower($now->format('l')),
+    ]);
 }
 
 if ($path === '/staff/customers/search' && $method === 'GET') {
@@ -3614,6 +3811,13 @@ if (preg_match('#^/staff/orders/(\d+)$#', $path, $m) && $method === 'DELETE') {
     }
 }
 
+if ($path === '/staff/delivery-slabs' && $method === 'GET') {
+    $staff = current_user(true,'staff');
+    $deliveryPermissions = staff_permissions((int)$staff['id']);
+    if (($staff['role'] ?? '') !== 'admin' && empty($deliveryPermissions['create_orders']) && empty($deliveryPermissions['edit_orders'])) json_response(['error'=>'Staff order creation or editing permission required'],403);
+    json_response(['items'=>db()->query('SELECT * FROM staff_delivery_slabs WHERE is_active=1 ORDER BY priority ASC,min_order_amount DESC,id ASC')->fetchAll()]);
+}
+
 if ($path === '/staff/orders' && $method === 'POST') {
     $staff = current_user(true, 'staff');
     require_staff_permission($staff, 'create_orders');
@@ -3629,6 +3833,7 @@ if ($path === '/staff/orders' && $method === 'POST') {
     $existing = $pdo->prepare('SELECT * FROM orders WHERE idempotency_key=? LIMIT 1');
     $existing->execute([$idempotency]);
     if ($row = $existing->fetch()) {
+        if (($row['source'] ?? '') !== 'staff_offline' || (int)($row['staff_id'] ?? 0) !== (int)$staff['id']) json_response(['error'=>'Idempotency key has already been used'],409);
         json_response(['order' => public_order($row), 'duplicate' => true]);
     }
     $discountType = (string)($data['discount_type'] ?? 'none');
@@ -3636,25 +3841,25 @@ if ($path === '/staff/orders' && $method === 'POST') {
         require_staff_permission($staff, 'apply_manual_discount');
     }
     $itemsCalcType = $orderType === 'delivery' ? 'takeaway' : $orderType;
-    $calc = calculate_cart($data['items'], $data['coupon_code'] ?? null, null, null, null, $itemsCalcType, true);
+    $staffItems = prepare_staff_cart_items($data['items'],$staff);
+    $calc = calculate_cart($staffItems, $data['coupon_code'] ?? null, null, null, null, $itemsCalcType, true,$staff);
     $staffDiscount = staff_discount_from_payload($data, $calc);
     $totalDiscount = money((float)$calc['discount'] + (float)$staffDiscount['amount']);
     $discountTypes = array_filter([$calc['discount_type'] ?? null, $staffDiscount['type'] ?? null]);
-    $discountDescription = implode('; ', array_filter([$calc['discount_description'] ?? null, $staffDiscount['description'] ?? null]));
+    $discountDescription = discount_description_text(implode('; ', array_filter([$calc['discount_description'] ?? null, $staffDiscount['description'] ?? null])));
     // Delivery charges are always computed server-side from the delivery slabs; any delivery_charge sent by the client is ignored.
     $deliveryAddress = null;
     $deliveryLat = null;
     $deliveryLng = null;
     $deliveryDistanceKm = null;
     $deliveryCharge = 0.0;
+    $staffDeliverySnapshot = null;
     if ($orderType === 'delivery') {
         $deliveryAddress = trim((string)($data['delivery_address'] ?? ''));
         if ($deliveryAddress === '') json_response(['error' => 'Delivery address is required'], 422);
-        $resolvedDelivery = delivery_for_staff_order(money((float)$calc['subtotal'] - (float)$calc['discount']), $data['latitude'] ?? null, $data['longitude'] ?? null, $data['distance_km'] ?? null);
-        $deliveryLat = $resolvedDelivery['lat'];
-        $deliveryLng = $resolvedDelivery['lng'];
-        $deliveryDistanceKm = $resolvedDelivery['distance_km'];
-        $deliveryCharge = (float)$resolvedDelivery['delivery']['delivery_charge'];
+        try { $staffDeliverySnapshot = staff_delivery_quote(money((float)$calc['subtotal'] - $totalDiscount),!empty($data['staff_delivery_slab_id']) ? (int)$data['staff_delivery_slab_id'] : null); }
+        catch (ApiException $e) { json_response(['error'=>$e->getMessage()],$e->status); }
+        $deliveryCharge = (float)$staffDeliverySnapshot['charge'];
     }
     $orderTotal = money(max((float)$calc['subtotal'] - $totalDiscount + $deliveryCharge, 0));
     $payment = staff_payment_state($paymentMethod, $orderTotal, $data['cash_received'] ?? 0, $data['online_received'] ?? 0);
@@ -3680,6 +3885,7 @@ if ($path === '/staff/orders' && $method === 'POST') {
         $staffAcceptedAt = date('Y-m-d H:i:s');
         $stmt->execute([$orderNumber, $staff['id'], 'staff_offline', $customerName ?: null, $customerPhone ?: null, $customerEmail ?: null, $orderType, 'accepted', $staffAcceptedAt, $calc['subtotal'], $totalDiscount, $discountTypes ? implode(',', $discountTypes) : null, $discountDescription !== '' ? $discountDescription : null, $staffDiscount['type'] ?? null, $staffDiscount['value'] ?? null, ($staffDiscount['amount'] ?? 0) > 0 ? $staffDiscount['amount'] : null, $staffDiscount['description'] ?? null, $staffDiscount['offer_id'] ?? null, $deliveryCharge, $deliveryAddress, $deliveryLat, $deliveryLng, $deliveryDistanceKm, $orderTotal, $calc['coupon']['id'] ?? null, $paymentMode, $paymentMethod, $cashReceived, $onlineReceived, $changeAmount, $changeAmount, $totalReceived, $tableNumber ?: null, $paymentStatus, $paidAmount, $remainingAmount, $paidAt, $idempotency]);
         $orderId = (int)$pdo->lastInsertId();
+        if ($staffDeliverySnapshot !== null) $pdo->prepare('UPDATE orders SET staff_delivery_slab_id=?,staff_delivery_snapshot=? WHERE id=?')->execute([$staffDeliverySnapshot['id'],json_encode($staffDeliverySnapshot,JSON_UNESCAPED_SLASHES),$orderId]);
         foreach ($calc['lines'] as $line) {
             $item = $line['item'];
             $variant = $line['variant'];
@@ -3702,6 +3908,7 @@ if ($path === '/staff/orders' && $method === 'POST') {
         if ($payment['online_paid'] > 0) {
             $pdo->prepare('INSERT INTO payments (order_id, amount, status, method) VALUES (?, ?, ?, ?)')->execute([$orderId, $payment['online_paid'], 'verified', 'counter_online']);
         }
+        audit_staff_adjustments($orderId,(int)$staff['id'],'order_created',$calc,$staffDeliverySnapshot);
         $pdo->commit();
     } catch (ApiException $e) {
         $pdo->rollBack();
@@ -3717,12 +3924,16 @@ if ($path === '/staff/orders' && $method === 'POST') {
 
 if (preg_match('#^/staff/orders/(\d+)$#', $path, $m) && $method === 'PUT') {
     $staff = current_user(true, 'staff');
-    $stmt = db()->prepare("SELECT * FROM orders WHERE id=? AND staff_id=? AND source='staff_offline' LIMIT 1");
+    $stmt = db()->prepare("SELECT * FROM orders WHERE id=? AND ((staff_id=? AND source='staff_offline') OR (source='customer_online' AND payment_status IN ('Paid','Partially Paid','COD'))) LIMIT 1");
     $stmt->execute([(int)$m[1], $staff['id']]);
     $order = $stmt->fetch();
     if (!$order) json_response(['error' => 'Order not found'], 404);
     $status = (string)($data['status'] ?? '');
-    if (!in_array($status, ['accepted','ready','delivered','cancelled'], true)) json_response(['error' => 'Invalid staff order action'], 422);
+    if ($order['source'] === 'customer_online') {
+        require_staff_permission($staff, 'view_current_orders');
+        if ($status === 'delivered' && $order['order_type'] === 'delivery') json_response(['error' => 'Delivery completion must use the delivery workflow'], 422);
+    }
+    if (!in_array($status, ['accepted','preparing','ready','picked_up','delivered','cancelled'], true)) json_response(['error' => 'Invalid staff order action'], 422);
     if ($status === 'accepted') {
         require_staff_permission($staff, 'confirm_orders');
     } elseif ($status === 'cancelled') {
@@ -3744,6 +3955,7 @@ if (preg_match('#^/staff/orders/(\d+)$#', $path, $m) && $method === 'PUT') {
         json_response(['error' => 'Order status changed. Please refresh and retry.'], 409);
     }
     db()->prepare('INSERT INTO order_status_history (order_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)')->execute([$order['id'], $order['status'], $status, $staff['id']]);
+    if ($order['source'] === 'customer_online') queue_order_notifications((int)$order['id'], 'Your order is now ' . status_label($status));
     $fresh = db()->prepare('SELECT * FROM orders WHERE id=?');
     $fresh->execute([$order['id']]);
     json_response(['ok' => true, 'order' => public_order($fresh->fetch())]);
@@ -3770,7 +3982,9 @@ if (preg_match('#^/staff/orders/(\d+)/edit$#', $path, $m)) {
 if (preg_match('#^/staff/orders/(\d+)/invoice$#', $path, $m) && $method === 'GET') {
     $staff = current_user(true, 'staff');
     $order = order_with_customer((int)$m[1]);
-    if (!$order || (int)($order['staff_id'] ?? 0) !== (int)$staff['id']) json_response(['error' => 'Order not found'], 404);
+    if (!$order) json_response(['error' => 'Order not found'], 404);
+    if ($order['source'] === 'customer_online') require_staff_permission($staff, 'view_current_orders');
+    elseif ((int)($order['staff_id'] ?? 0) !== (int)$staff['id']) json_response(['error' => 'Order not found'], 404);
     send_pdf_response($order);
 }
 
@@ -3913,6 +4127,7 @@ if (str_starts_with($path, '/delivery')) {
 
 if (str_starts_with($path, '/admin')) {
     $admin = current_user(true, 'admin');
+    handle_staff_delivery_admin($path,$method,$data);
     if ($path === '/admin/customers' && $method === 'GET') {
         $pagination = pagination_params(25, 100);
         $q = trim((string)($_GET['q'] ?? ''));
@@ -4157,6 +4372,8 @@ if (str_starts_with($path, '/admin')) {
         try {
             $stmt->execute([trim((string)$data['name']), trim((string)$data['phone']), strtolower(trim((string)$data['email'])), password_hash((string)$data['password'], PASSWORD_DEFAULT), $isActive]);
         } catch (PDOException $e) {
+            if (($e->errorInfo[1] ?? null) !== 1062) throw $e;
+            security_log_exception($e, 'duplicate user');
             json_response(['error' => 'A user with this email already exists'], 422);
         }
         $id = (int)db()->lastInsertId();
@@ -4213,6 +4430,8 @@ if (str_starts_with($path, '/admin')) {
             $stmt = db()->prepare("INSERT INTO users (name, phone, email, password_hash, role, is_active) VALUES (?, ?, ?, ?, 'staff', ?)");
             $stmt->execute([trim((string)$data['name']), trim((string)$data['phone']), strtolower(trim((string)$data['email'])), password_hash((string)$data['password'], PASSWORD_DEFAULT), $isActive]);
         } catch (PDOException $e) {
+            if (($e->errorInfo[1] ?? null) !== 1062) throw $e;
+            security_log_exception($e, 'duplicate staff');
             json_response(['error' => 'A user with this email already exists'], 422);
         }
         $id = (int)db()->lastInsertId();
@@ -4296,6 +4515,67 @@ if (str_starts_with($path, '/admin')) {
             $stmt->execute([$key, $value]);
         }
         json_response(['settings' => sanitized_settings(settings())]);
+    }
+    if (preg_match('#^/admin/toppings(?:/(\d+))?$#', $path, $toppingMatch)) {
+        $id = (int)($toppingMatch[1] ?? 0);
+        $existingTopping = [];
+        $groupSql = "SELECT id FROM menu_option_groups WHERE LOWER(name) LIKE '%topping%' OR LOWER(REPLACE(REPLACE(name,'-',''),' ','')) IN ('addon','addons')";
+        if ($method === 'GET' && !$id) {
+            $toppings = db()->query("SELECT o.*,g.name AS group_name FROM menu_item_options o JOIN menu_option_groups g ON g.id=o.group_id WHERE o.group_id IN ($groupSql) ORDER BY g.sort_order,o.name")->fetchAll();
+            foreach ($toppings as &$topping) { $topping['category_ids'] = json_int_list($topping['category_ids'] ?? ''); $topping['product_ids'] = json_int_list($topping['product_ids'] ?? ''); $topping['group_name'] = str_contains(strtolower($topping['group_name']),'topping') ? 'Pizza Topping' : 'Add-On'; }
+            unset($topping);
+            json_response(['items' => $toppings]);
+        }
+        if ($id) {
+            $check = db()->prepare("SELECT * FROM menu_item_options WHERE id=? AND group_id IN ($groupSql)");
+            $check->execute([$id]);
+            $existingTopping = $check->fetch();
+            if (!$existingTopping) json_response(['error' => 'Topping not found'], 404);
+        }
+        if ($method === 'DELETE' && $id) {
+            // Snapshots in order_items retain the original name, selections and prices.
+            db()->prepare('UPDATE menu_item_options SET is_active=0 WHERE id=?')->execute([$id]);
+            json_response(['ok' => true,'archived'=>true]);
+        }
+        if (in_array($method, ['POST', 'PUT'], true)) {
+            $fields = array_flip(['name', 'small_price', 'medium_price', 'large_price', 'fixed_price', 'applies_to', 'is_active','category_ids','product_ids']);
+            $payload = array_replace(array_intersect_key($existingTopping, $fields), array_intersect_key($data, $fields));
+            if (trim((string)($payload['name'] ?? '')) === '') json_response(['error' => 'Topping name is required'], 422);
+            $payload['name'] = trim((string)$payload['name']);
+            if (strlen($payload['name']) > 120) json_response(['error' => 'Topping name is too long'], 422);
+            foreach (['small_price', 'medium_price', 'large_price', 'fixed_price'] as $priceField) {
+                $price = $payload[$priceField] ?? null;
+                if ($price === '' || $price === null) { $payload[$priceField] = null; continue; }
+                if (!valid_decimal($price) || (float)$price < 0 || (float)$price > 99999999.99) json_response(['error' => "Invalid $priceField"], 422);
+                $payload[$priceField] = money((float)$price);
+            }
+            if (!in_array($payload['applies_to'] ?? 'pizza', ['pizza', 'all'], true)) json_response(['error' => 'Invalid topping availability'], 422);
+            $payload['applies_to'] = $payload['applies_to'] ?? 'pizza';
+            if (!in_array((string)($payload['is_active'] ?? '1'), ['0', '1'], true)) json_response(['error' => 'Invalid topping status'], 422);
+            $payload['is_active'] = (int)($payload['is_active'] ?? 1);
+            if ($payload['is_active'] && ($payload['applies_to'] === 'all' || $payload['small_price'] === null || $payload['medium_price'] === null || $payload['large_price'] === null) && $payload['fixed_price'] === null) json_response(['error'=>'Enter a base price for add-ons or any sizes without an explicit price'],422);
+            $payload = topping_scope_payload($payload);
+            $groupName = $data['group_name'] ?? null;
+            if ($groupName !== null || (!$id && $method === 'POST')) {
+                $groupName = $groupName ?? 'Pizza Topping';
+                $groupLookup = db()->prepare($groupName === 'Pizza Topping' ? "SELECT id FROM menu_option_groups WHERE LOWER(name) LIKE '%topping%' ORDER BY id LIMIT 1" : "SELECT id FROM menu_option_groups WHERE LOWER(REPLACE(REPLACE(name,'-',''),' ','')) IN ('addon','addons') ORDER BY id LIMIT 1");
+                $groupLookup->execute(); $groupId = $groupLookup->fetchColumn();
+                if (!$groupId) { db()->prepare('INSERT INTO menu_option_groups (name,slug) VALUES (?,?)')->execute([$groupName,$groupName === 'Pizza Topping' ? 'pizza-topping' : 'add-on']); $groupId = db()->lastInsertId(); }
+                $payload['group_id'] = $groupId;
+            }
+            if (!$id && $method === 'POST') {
+                $payload['slug'] = slugify($payload['name']) . '-' . bin2hex(random_bytes(4));
+                $cols = array_keys($payload);
+                db()->prepare('INSERT INTO menu_item_options (' . implode(',', $cols) . ') VALUES (' . implode(',', array_fill(0, count($cols), '?')) . ')')->execute(array_values($payload));
+                json_response(['ok' => true, 'id' => (int)db()->lastInsertId()], 201);
+            }
+            if ($id && $method === 'PUT') {
+                $sets = implode(',', array_map(fn($c) => "$c=?", array_keys($payload)));
+                db()->prepare("UPDATE menu_item_options SET $sets WHERE id=?")->execute([...array_values($payload), $id]);
+                json_response(['ok' => true]);
+            }
+        }
+        json_response(['error' => 'Unsupported topping operation'], 405);
     }
     $resources = [
         'categories' => ['table' => 'categories', 'fields' => ['name','slug','description','image_url','sort_order','is_active']],

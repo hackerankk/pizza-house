@@ -1,4 +1,9 @@
 DirectoryIndex index.php
+Options -Indexes
+
+<FilesMatch "(?i)^(config\.php|\.env.*|\.user\.ini|.*\.(log|sql|bak|old))$">
+  Require all denied
+</FilesMatch>
 
 <IfModule mod_rewrite.c>
   RewriteEngine On
@@ -9,6 +14,7 @@ DirectoryIndex index.php
 
 <IfModule mod_headers.c>
   Header always set X-Content-Type-Options "nosniff"
-  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set X-Frame-Options "DENY"
   Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(self), payment=()"
 </IfModule>

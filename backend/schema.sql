@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS menu_item_options (
   large_price DECIMAL(10,2) NULL,
   fixed_price DECIMAL(10,2) NULL,
   applies_to ENUM('pizza','all') NOT NULL DEFAULT 'pizza',
+  category_ids TEXT NULL,
+  product_ids TEXT NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -267,6 +269,20 @@ CREATE TABLE IF NOT EXISTS theme_settings (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- No staff charge is seeded: the business must explicitly configure it.
+CREATE TABLE IF NOT EXISTS staff_delivery_slabs (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(120) NOT NULL,
+  min_order_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+  max_order_amount DECIMAL(10,2) NULL,
+  charge DECIMAL(10,2) NOT NULL,
+  priority INT UNSIGNED NOT NULL DEFAULT 100,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_staff_delivery_active_amount (is_active,min_order_amount,max_order_amount,priority)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS orders (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   order_number VARCHAR(40) NOT NULL UNIQUE,
@@ -288,6 +304,8 @@ CREATE TABLE IF NOT EXISTS orders (
   staff_discount_description VARCHAR(255) NULL,
   staff_offer_id BIGINT UNSIGNED NULL,
   delivery_charge DECIMAL(10,2) NOT NULL DEFAULT 0,
+  staff_delivery_slab_id BIGINT UNSIGNED NULL,
+  staff_delivery_snapshot TEXT NULL,
   total_amount DECIMAL(10,2) NOT NULL,
   coupon_id BIGINT UNSIGNED NULL,
   delivery_boy_id BIGINT UNSIGNED NULL,
@@ -332,6 +350,18 @@ CREATE TABLE IF NOT EXISTS orders (
   FOREIGN KEY (staff_id) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (delivery_boy_id) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (coupon_id) REFERENCES coupons(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS staff_order_adjustment_audit (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  order_id BIGINT UNSIGNED NOT NULL,
+  actor_id BIGINT UNSIGNED NULL,
+  action VARCHAR(40) NOT NULL,
+  details LONGTEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_staff_adjustment_order (order_id,created_at),
+  FOREIGN KEY (order_id) REFERENCES orders(id),
+  FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -523,3 +553,15 @@ WHERE NOT EXISTS (SELECT 1 FROM delivery_slabs WHERE min_km=3.01 AND max_km=6 AN
 UNION ALL
 SELECT 0,6.01,10,10,0,80,120,'delivery',1
 WHERE NOT EXISTS (SELECT 1 FROM delivery_slabs WHERE min_km=6.01 AND max_km=10 AND free_delivery_enabled=0);
+
+-- Shared atomic counters; hashed identities only. No existing application data changes.
+CREATE TABLE IF NOT EXISTS request_rate_limits (
+  bucket_key CHAR(64) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+  request_count INT UNSIGNED NOT NULL DEFAULT 0,
+  window_started BIGINT UNSIGNED NOT NULL,
+  failures INT UNSIGNED NOT NULL DEFAULT 0,
+  last_failure BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  next_allowed BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  expires_at BIGINT UNSIGNED NOT NULL,
+  INDEX idx_rate_limits_expiry (expires_at)
+) ENGINE=InnoDB;
