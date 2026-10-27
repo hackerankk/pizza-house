@@ -1,3 +1,5 @@
+import { isPizzaProduct } from '../product-type.mjs';
+
 export const isFreeLine = line => Boolean(line?.is_bogo_free || line?.is_manual_free);
 
 export function staffBogoSizeCode(name = '') {
@@ -27,7 +29,7 @@ export function staffBogoAllowedFreeSizes(offer, paidName, weekday) {
 }
 
 export function staffBogoOfferForLine(line, offers, weekday) {
-  if (!line || isFreeLine(line) || !['S', 'M', 'L'].includes(staffBogoSizeCode(line.variant_name))) return null;
+  if (!line || !isPizzaProduct(line) || isFreeLine(line) || !['S', 'M', 'L'].includes(staffBogoSizeCode(line.variant_name))) return null;
   return (offers || []).find(offer => {
     const products = (offer.product_ids || []).map(Number);
     const categories = (offer.category_ids || []).map(Number);
@@ -39,7 +41,7 @@ export function staffBogoOfferForLine(line, offers, weekday) {
 }
 
 export function staffBogoPairAllowed(offer, paid, free, weekday) {
-  if (!offer || !paid || !free || isFreeLine(paid) || free.is_manual_free) return false;
+  if (!offer || !paid || !free || !isPizzaProduct(free) || isFreeLine(paid) || free.is_manual_free) return false;
   if (!staffBogoOfferForLine(paid, [offer], weekday)) return false;
   if (!staffBogoAllowedFreeSizes(offer, paid.variant_name, weekday).includes(staffBogoSizeCode(free.variant_name))) return false;
   if (!Number.isFinite(Number(free.price)) || Number(free.price) > Number(paid.price)) return false;
@@ -129,7 +131,7 @@ export function optionSelections(line) {
 
 export function optionApplies(option, item, variantName) {
   if (option.is_active !== undefined && Number(option.is_active) !== 1) return false;
-  if (!['S', 'M', 'L'].includes(variantName) && option.applies_to !== 'all') return false;
+  if ((!isPizzaProduct(item) || !['S', 'M', 'L'].includes(variantName)) && option.applies_to !== 'all') return false;
   const ids = value => {
     if (Array.isArray(value)) return value.map(Number);
     try { const parsed = JSON.parse(value || '[]'); return Array.isArray(parsed) ? parsed.map(Number) : []; } catch { return []; }
@@ -140,12 +142,12 @@ export function optionApplies(option, item, variantName) {
 }
 
 export function eligibleManualProducts(items, parent, crossCategory = false) {
-  return (items || []).filter(item => (item.is_active === undefined || Number(item.is_active) === 1) && Number(item.stock) > 0 && (crossCategory || Number(item.category_id) === Number(parent?.category_id)) && (item.variants || []).some(variant => ['S', 'M', 'L'].includes(variant.name) && (variant.is_active === undefined || Number(variant.is_active) === 1)));
+  return (items || []).filter(item => isPizzaProduct(item) && (item.is_active === undefined || Number(item.is_active) === 1) && Number(item.stock) > 0 && (crossCategory || Number(item.category_id) === Number(parent?.category_id)) && (item.variants || []).some(variant => ['S', 'M', 'L'].includes(variant.name) && (variant.is_active === undefined || Number(variant.is_active) === 1)));
 }
 
 export function manualFreeRemaining(cart, parentKey) {
   const parent = cart.find(line => String(line.key) === String(parentKey) && !isFreeLine(line));
-  if (!parent || !['S', 'M', 'L'].includes(parent.variant_name)) return 0;
+  if (!parent || !isPizzaProduct(parent) || !['S', 'M', 'L'].includes(parent.variant_name)) return 0;
   const used = cart.filter(line => line.is_manual_free && String(line.manual_parent_key) === String(parentKey)).reduce((sum, line) => sum + Number(line.quantity || 0), 0);
   return Math.max(0, Number(parent.quantity || 0) - used);
 }
@@ -158,7 +160,7 @@ export function reconcileManualFreeCart(lines) {
     if (!line.is_manual_free) return [line];
     const key = String(line.manual_parent_key || '');
     const parent = parents.get(key);
-    if (!parent || !['S', 'M', 'L'].includes(parent.variant_name) || !['S', 'M', 'L'].includes(line.variant_name)) return [];
+    if (!parent || !isPizzaProduct(parent) || !isPizzaProduct(line) || !['S', 'M', 'L'].includes(parent.variant_name) || !['S', 'M', 'L'].includes(line.variant_name)) return [];
     const remaining = Number(parent.quantity || 0) - (used.get(key) || 0);
     const quantity = Math.min(Number(line.quantity || 0), remaining);
     if (quantity <= 0) return [];

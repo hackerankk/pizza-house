@@ -10,6 +10,7 @@ import { EmptyState, ErrorState, LoadingState } from '../components/AsyncState';
 import OptimizedImage from '../components/OptimizedImage';
 import { reducedMotionPreferred, scrollBehavior } from '../motion';
 import useDialogFocus from '../components/useDialogFocus';
+import { loadCatalog, orderCanEdit } from './admin-workflows.mjs';
 import { editableLine, idList, optionAppliesTo, orderLinePayload, removeLineAndFreeChildren, selectionSignature } from './admin-order-editing.mjs';
 
 const resources = {
@@ -220,9 +221,9 @@ function orderStatusLabel(order) {
 
 function nextStatuses(order) {
   if (order.source === 'staff_offline') {
-    if (order.status === 'received') return ['accepted'];
-    if (order.status === 'accepted') return ['ready'];
-    if (order.status === 'ready') return ['delivered'];
+    if (order.status === 'received') return ['accepted', 'cancelled'];
+    if (order.status === 'accepted') return ['ready', 'cancelled'];
+    if (order.status === 'ready') return ['delivered', 'cancelled'];
     return [];
   }
   const deliveryFlow = ['received', 'accepted', 'preparing', 'ready', 'picked_up', 'out_for_delivery', 'delivered'];
@@ -723,6 +724,7 @@ export default function AdminPage() {
   const [editing, setEditing] = useState(null);
   const [orders, setOrders] = useState([]);
   const [todayOrders, setTodayOrders] = useState([]);
+  const orderHistoryFilteredRef = useRef(false);
   const [orderFilters, setOrderFilters] = useState({ q: '', source: '', status: '' });
   const [orderDetails, setOrderDetails] = useState(null);
   const [orderDetailsLoading, setOrderDetailsLoading] = useState(false);
@@ -770,6 +772,14 @@ export default function AdminPage() {
   const [loadedTab, setLoadedTab] = useState('');
   const activeLoadRef = useRef(null);
   const [mobileNav, setMobileNav] = useState(false);
+  const [mobileNavigation, setMobileNavigation] = useState(false);
+  const navDialogRef = useDialogFocus(mobileNav && mobileNavigation, () => setMobileNav(false));
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 1020px)');
+    const update = () => { setMobileNavigation(media.matches); if (!media.matches) setMobileNav(false); };
+    update(); media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
   const [newOrderAlert, setNewOrderAlert] = useState(null);
   const [alertQueue, setAlertQueue] = useState([]);
   const [alertsEnabled, setAlertsEnabled] = useState(false);
@@ -928,12 +938,12 @@ export default function AdminPage() {
     try {
       if (active === 'dashboard') setStats((await loadRequest('/admin/dashboard')).stats);
       else if (resources[active]) {
-        const data = await loadRequest(`/admin/${active}`);
+        const data = await loadCatalog(loadRequest, `/admin/${active}`);
         setItems(data.items || []);
         if (['products', 'toppings', 'offers', 'promotional-banners', 'promotional-popups'].includes(active)) {
           const [productsData, categoriesData] = await Promise.all([
-            active === 'products' ? Promise.resolve(data) : loadRequest('/admin/products'),
-            loadRequest('/admin/categories')
+            active === 'products' ? Promise.resolve(data) : loadCatalog(loadRequest, '/admin/products'),
+            loadCatalog(loadRequest, '/admin/categories')
           ]);
           setCatalogProducts(productsData.items || []);
           setCatalogCategories(categoriesData.items || []);
@@ -941,6 +951,7 @@ export default function AdminPage() {
       }
       else if (active === 'orders') {
         const historyParams = new URLSearchParams(Object.fromEntries(Object.entries(orderFilters).filter(([, value]) => value)));
+        orderHistoryFilteredRef.current = Boolean(historyParams.toString());
         const [todayData, ordersData, boysData] = await Promise.all([
           loadRequest('/admin/orders?scope=today'),
           loadRequest(`/admin/orders${historyParams.toString() ? `?${historyParams}` : ''}`),
@@ -1175,7 +1186,8 @@ export default function AdminPage() {
     try {
       const data = await adminRequest('/admin/orders');
       const nextOrders = data.orders || [];
-      setOrders(nextOrders);
+      // An alert response must never replace an explicitly filtered history.
+      if (!orderHistoryFilteredRef.current) setOrders(nextOrders);
       const pendingAlerts = nextOrders.filter(isAlertableOrder).sort((a, b) => Number(a.id) - Number(b.id));
       const pendingIds = new Set(pendingAlerts.map(order => Number(order.id)));
       if (!alertBaselineReadyRef.current) {
@@ -1565,6 +1577,7 @@ export default function AdminPage() {
         api('/menu')
       ]);
       if (request !== orderEditLoadRef.current) return;
+      if (details.can_edit === false || !orderCanEdit(details.order)) { setMessage('This order is complete and cannot be edited.'); return; }
       setOrderEdit(details);
       setOrderEditMenu(menu);
       setOrderDetails(null);
@@ -2163,7 +2176,7 @@ export default function AdminPage() {
                 <td>
                   <div className="order-action-stack">
                     <button className="ghost" onClick={() => openOrderDetails(order)}><Eye size={16} /> Details</button>
-                    <button className="ghost" onClick={() => openOrderEdit(order)}><ShoppingBag size={16} /> Edit Order</button>
+                    <button className="ghost" disabled={!orderCanEdit(order)} onClick={() => openOrderEdit(order)}><ShoppingBag size={16} /> Edit Order</button>
                     <button className="ghost" onClick={() => viewAdminInvoice(order, false)}><FileText size={16} /> Invoice</button>
                     {order.status === 'delivered' && order.source === 'staff_offline' ? <span className="badge success">Completed</span> : null}
                     {order.status === 'received' && isAlertableOrder(order) && order.source !== 'staff_offline' ? <button className="ghost" onClick={() => openAcceptOrder(order)}><Clock size={16} /> Accept</button> : null}
@@ -2265,10 +2278,10 @@ export default function AdminPage() {
         )
       ) : null}
       {mobileNav ? <button className="admin-drawer-backdrop mobile-only" aria-label="Close admin navigation" onClick={() => setMobileNav(false)} /> : null}
-      <aside className={mobileNav ? 'admin-sidebar open' : 'admin-sidebar'}>
+      <aside id="admin-navigation" ref={navDialogRef} className={mobileNav ? 'admin-sidebar open' : 'admin-sidebar'} role={mobileNavigation ? 'dialog' : undefined} aria-modal={mobileNavigation && mobileNav ? 'true' : undefined} aria-label="Admin navigation" aria-hidden={mobileNavigation && !mobileNav ? 'true' : undefined} inert={mobileNavigation && !mobileNav} tabIndex={mobileNavigation ? -1 : undefined}>
         <div className="row">
           <Link href="/" className="brand mark"><span className="brand-icon">TP</span><span>The Pizza House</span></Link>
-          <button className="icon-button mobile-only" onClick={() => setMobileNav(false)}><X size={18} /></button>
+          <button className="icon-button mobile-only" aria-label="Close admin navigation" onClick={() => setMobileNav(false)}><X size={18} /></button>
         </div>
         <nav className="admin-nav-groups">
           {navSections.map(section => (
@@ -2290,7 +2303,7 @@ export default function AdminPage() {
       <section className="admin-main">
         <header className="admin-topbar">
           <div className="admin-title-row">
-            <button className="icon-button mobile-only" onClick={() => setMobileNav(true)}><Menu size={20} /></button>
+            <button className="icon-button mobile-only" aria-label="Open admin navigation" aria-controls="admin-navigation" aria-expanded={mobileNav} onClick={() => setMobileNav(true)}><Menu size={20} /></button>
             <div><span className="eyebrow">Admin portal</span><h1>{activeLabel}</h1></div>
           </div>
           <div className="admin-topbar-actions">
@@ -2631,7 +2644,7 @@ export default function AdminPage() {
                       <td>
                         <div className="order-action-stack">
                           <button className="ghost" onClick={() => openOrderDetails(order)}><Eye size={16} /> Details</button>
-                          <button className="ghost" onClick={() => openOrderEdit(order)}><ShoppingBag size={16} /> Edit Order</button>
+                          <button className="ghost" disabled={!orderCanEdit(order)} onClick={() => openOrderEdit(order)}><ShoppingBag size={16} /> Edit Order</button>
                           <button className="ghost" onClick={() => viewAdminInvoice(order, false)}><FileText size={16} /> Invoice</button>
                           {order.status === 'delivered' && order.source === 'staff_offline' ? <span className="badge success">Completed</span> : null}
                           {order.status === 'received' && isAlertableOrder(order) && order.source !== 'staff_offline' ? <button className="ghost" onClick={() => openAcceptOrder(order)}><Clock size={16} /> Accept</button> : null}

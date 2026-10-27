@@ -10,7 +10,9 @@ import { scrollBehavior } from '../motion';
 import OptimizedImage from './OptimizedImage';
 import { trackEvent } from '../analytics';
 import useDialogFocus from './useDialogFocus';
+import { isPizzaProduct } from '../product-type.mjs';
 import { optionAvailableForProduct } from '../option-availability.mjs';
+import { menuDescription, publicPickupAddress } from '../customer-copy.mjs';
 
 function destinationHref(item) {
   if (!item || item.destination_type === 'none') return '';
@@ -153,7 +155,7 @@ function repriceCartLine(line, freshItems, freshGroups) {
   const optionsById = new Map((freshGroups || []).flatMap(group => (group.options || []).map(option => [String(option.id), { ...option, group_name: group.name }])));
   const options = (line.option_ids || []).map(id => optionsById.get(String(id))).filter(option => option && optionAvailableForProduct(option, item, variant));
   const price = effectiveVariantPrice(item, variant) + options.reduce((sum, option) => sum + cartOptionPrice(option, variant?.name), 0);
-  return { ...line, name: item.name, category_id: item.category_id, stock: item.stock, variant_id: variant?.id || null, variant_name: variant?.name || null, option_ids: options.map(option => Number(option.id)), options: options.map(option => ({ ...option, price: cartOptionPrice(option, variant?.name) })), price };
+  return { ...line, name: item.name, is_pizza: isPizzaProduct(item), category_name: item.category_name, category_slug: item.category_slug, category_id: item.category_id, stock: item.stock, variant_id: variant?.id || null, variant_name: variant?.name || null, option_ids: options.map(option => Number(option.id)), options: options.map(option => ({ ...option, price: cartOptionPrice(option, variant?.name) })), price };
 }
 
 function sameCart(a, b) {
@@ -465,7 +467,7 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
   if (!item) return null;
 
   const variant = variants.find(v => Number(v.id) === Number(variantId)) || firstVariant;
-  const isPizza = ['S', 'M', 'L'].includes(variant?.name);
+  const isPizza = isPizzaProduct(item) && ['S', 'M', 'L'].includes(variant?.name);
   const crustGroup = optionGroups.find(group => group.name?.toLowerCase() === 'crust');
   const toppingGroup = optionGroups.find(group => group.name?.toLowerCase().includes('topping'));
   const availableToppings = (toppingGroup?.options || []).filter(option => optionAvailableForProduct(option, item, variant));
@@ -499,6 +501,7 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
   }
 
   function variantLabel(name) {
+    if (!isPizzaProduct(item)) return name === 'S' ? 'Standard' : name;
     if (name === 'S') return 'Small';
     if (name === 'M') return 'Medium';
     if (name === 'L') return 'Large';
@@ -511,14 +514,14 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
         <div className="option-modal-header">
           <div>
             <h2 id="product-options-title">{item.name}</h2>
-            <p>{item.description}</p>
+            {menuDescription(item.description) ? <p>{menuDescription(item.description)}</p> : null}
           </div>
           <button className="icon-button" onClick={onClose} aria-label="Close options"><X size={18} /></button>
         </div>
 
         {variants.length > 0 ? (
           <section className="option-section">
-            <h3>{variants.some(variant => ['S', 'M', 'L'].includes(variant.name)) ? 'Choose Size' : 'Choose Variant'}</h3>
+            <h3>{isPizzaProduct(item) && variants.some(variant => ['S', 'M', 'L'].includes(variant.name)) ? 'Choose Size' : 'Choose Variant'}</h3>
             <div className="choice-list">
               {variants.map(v => (
                 <label className="choice-row" key={v.id}>
@@ -604,7 +607,7 @@ function BogoFreePizzaModal({ unlock, items, categories, weekday, onClose, onAdd
     const categoryIds = unlock.offer?.category_ids || [];
     const productIds = unlock.offer?.free_product_ids || unlock.offer?.product_ids || [];
     return items.filter(item => {
-      const hasPizzaSize = (item.variants || []).some(variant => ['S', 'M', 'L'].includes(variant.name));
+      const hasPizzaSize = isPizzaProduct(item) && (item.variants || []).some(variant => ['S', 'M', 'L'].includes(variant.name));
       if (!hasPizzaSize) return false;
       if (productIds.length) return productIds.map(Number).includes(Number(item.id));
       if (categoryIds.length) return categoryIds.map(Number).includes(Number(item.category_id));
@@ -1067,7 +1070,7 @@ export default function Home() {
   }
 
   const offerForLine = useCallback((line) => {
-    if (line.is_bogo_free || !['S', 'M', 'L'].includes(pizzaSizeCode(line.variant_name))) return null;
+    if (!isPizzaProduct(line) || line.is_bogo_free || !['S', 'M', 'L'].includes(pizzaSizeCode(line.variant_name))) return null;
     return activeBogoOffers.find(offer => {
       const productIds = (offer.product_ids || []).map(Number);
       const categoryIds = (offer.category_ids || []).map(Number);
@@ -1189,7 +1192,7 @@ export default function Home() {
                     <div className="food-card-copy">
                       <h3>{item.name}</h3>
                       <strong className="price">{(item.variants || []).length > 1 ? `From ${inr(from)}` : inr(from)}</strong>
-                      <p>{item.description}</p>
+                      {menuDescription(item.description) ? <p>{menuDescription(item.description)}</p> : null}
                       <span className={Number(item.stock) > 0 ? 'stock-note' : 'stock-note sold-out'}>{Number(item.stock) > 0 ? 'Available now' : 'Sold out'}</span>
                     </div>
                     <div className="food-card-media">
@@ -1225,12 +1228,12 @@ export default function Home() {
       {categoryMoreOpen ? (
         <div className="category-more-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setCategoryMoreOpen(false); }}>
           <section ref={categoryDialogRef} className="category-more-panel" role="dialog" aria-modal="true" aria-labelledby="more-categories-title" tabIndex={-1}>
-            <div className="summary-header"><h2 id="more-categories-title">More categories</h2><button className="icon-button" aria-label="Close categories" onClick={() => setCategoryMoreOpen(false)}><X size={18} /></button></div>
-            <div className="category-more-grid">{overflowCategories.map(category => <button key={category.id} className={String(activeCategory) === String(category.id) ? 'vertical-category active' : 'vertical-category'} onClick={() => selectCategory(category.id)}>{category.name}</button>)}</div>
+            <div className="summary-header"><h2 id="more-categories-title">Categories</h2><button className="icon-button" aria-label="Close categories" onClick={() => setCategoryMoreOpen(false)}><X size={18} /></button></div>
+            <div className="category-more-grid">{categoryItems.map(category => <button key={category.id} className={String(activeCategory) === String(category.id) ? 'vertical-category active' : 'vertical-category'} onClick={() => selectCategory(category.id)}>{category.name}</button>)}</div>
           </section>
         </div>
       ) : null}
-      <footer className="footer"><div className="container footer-grid"><strong>The Pizza House</strong><span>{restaurantAddress || 'Order for delivery or takeaway'}</span><Link href="/privacy">Privacy and cookies</Link></div></footer>
+      <footer className="footer"><div className="container footer-grid"><strong>The Pizza House</strong><span>{publicPickupAddress(restaurantAddress) || 'Order for delivery or takeaway'}</span><Link href="/privacy">Privacy and cookies</Link></div></footer>
     </div>
   );
 }

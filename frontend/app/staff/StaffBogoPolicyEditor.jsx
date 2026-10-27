@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
+import { isPizzaProduct } from '../product-type.mjs';
 import { api } from '../lib';
 import useDialogFocus from '../components/useDialogFocus';
 import { staffBogoPolicyPayload, staffBogoSizeCode } from './staff-cart.mjs';
@@ -36,7 +37,7 @@ export default function StaffBogoPolicyEditor({ items, categories, onClose, onSa
   const requestRef = useRef(0);
   const savingRef = useRef(false);
   const dialogRef = useDialogFocus(true, () => { if (!savingRef.current) onClose(); });
-  const productsForSizes = sizes => items.filter(item => (item.is_active === undefined || Number(item.is_active) === 1) && categories.some(category => Number(category.id) === Number(item.category_id) && (category.is_active === undefined || Number(category.is_active) === 1)) && (item.variants || []).some(variant => sizes.includes(staffBogoSizeCode(variant.name)) && (variant.is_active === undefined || Number(variant.is_active) === 1) && Number(Number(variant.price) > 0 ? variant.price : item.price) > 0));
+  const productsForSizes = sizes => items.filter(item => isPizzaProduct(item) && (item.is_active === undefined || Number(item.is_active) === 1) && categories.some(category => Number(category.id) === Number(item.category_id) && (category.is_active === undefined || Number(category.is_active) === 1)) && (item.variants || []).some(variant => sizes.includes(staffBogoSizeCode(variant.name)) && (variant.is_active === undefined || Number(variant.is_active) === 1) && Number(Number(variant.price) > 0 ? variant.price : item.price) > 0));
   const paidProducts = productsForSizes(['M']);
   const freeProducts = productsForSizes(draft?.allowed_free_sizes?.M || ['M', 'S']);
   const eligibleCategories = categories.filter(category => paidProducts.some(product => Number(product.category_id) === Number(category.id)));

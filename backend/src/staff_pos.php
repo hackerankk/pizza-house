@@ -1,5 +1,6 @@
 <?php
 declare(strict_types=1);
+require_once __DIR__ . '/product_type.php';
 
 // Staff-only promotions and delivery prices do not change customer checkout rules.
 function discount_description_text(string $text): ?string {
@@ -47,7 +48,7 @@ function selected_option_quantities(array $item): array {
 }
 
 function option_applies_to_product(array $option, array $product, ?array $variant): bool {
-    if (($option['applies_to'] ?? 'pizza') === 'pizza' && !in_array((string)($variant['name'] ?? ''), ['S','M','L'], true)) return false;
+    if (($option['applies_to'] ?? 'pizza') === 'pizza' && (!product_is_pizza($product) || !in_array((string)($variant['name'] ?? ''), ['S','M','L'], true))) return false;
     $categories = json_int_list($option['category_ids'] ?? '');
     $products = json_int_list($option['product_ids'] ?? '');
     return (!$categories && !$products) || in_array((int)$product['id'], $products, true) || in_array((int)$product['category_id'], $categories, true);
@@ -132,7 +133,7 @@ function manual_free_discount(array $lines, array $actor): array {
         require_staff_permission($actor, 'apply_free_pizza');
         $parentKey = (string)$line['manual_parent_key'];
         $parent = $paid[$parentKey] ?? null;
-        if (!$parent || !in_array((string)($parent['variant']['name'] ?? ''), ['S','M','L'], true) || !in_array((string)($line['variant']['name'] ?? ''), ['S','M','L'], true)) throw new ApiException('A manual free pizza must be linked to a paid pizza with valid sizes', 422);
+        if (!$parent || !product_is_pizza($parent['item']) || !product_is_pizza($line['item']) || !in_array((string)($parent['variant']['name'] ?? ''), ['S','M','L'], true) || !in_array((string)($line['variant']['name'] ?? ''), ['S','M','L'], true)) throw new ApiException('A manual free pizza must be linked to a paid pizza with valid sizes', 422);
         if ((int)$line['item']['category_id'] !== (int)$parent['item']['category_id']) require_staff_permission($actor, 'free_pizza_cross_category');
         $used[$parentKey] = ($used[$parentKey] ?? 0) + (int)$line['quantity'];
         if ($used[$parentKey] > (int)$parent['quantity']) throw new ApiException('Only one manual free pizza is allowed per paid pizza quantity', 422);

@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { eligibleManualProducts, eligibleStaffSlabs, isFreeLine, manualFreeRemaining, optionApplies, optionSelections, reconcileManualFreeCart, reconcileStaffBogoCart, savedStaffDeliveryCharge, staffBogoAllowedFreeSizes, staffBogoCapacity, staffBogoOfferForLine, staffBogoOfferForPair, staffBogoPairAllowed, staffBogoPolicyPayload, staffBogoSelectionSignature, staffCartPayload, staffOptionPrice } from '../app/staff/staff-cart.mjs';
 
-const parent = { key: 'paid:a', id: 1, category_id: 3, variant_name: 'M', quantity: 2, price: 200 };
-const free = { key: 'free:a', id: 2, category_id: 3, variant_name: 'S', quantity: 1, price: 300, is_manual_free: true, manual_parent_key: parent.key };
+const parent = { key: 'paid:a', id: 1, is_pizza: true, category_id: 3, variant_name: 'M', quantity: 2, price: 200 };
+const free = { key: 'free:a', id: 2, is_pizza: true, category_id: 3, variant_name: 'S', quantity: 1, price: 300, is_manual_free: true, manual_parent_key: parent.key };
 
 test('manual promotion allows independent sizes and regular price above paid price', () => {
   assert.deepEqual(reconcileManualFreeCart([parent, free]), [parent, free]);
@@ -25,8 +25,8 @@ test('manual free capacity cannot duplicate free quantities and removal prunes c
 });
 
 test('free picker respects availability, valid sizes and separate cross-category permission', () => {
-  const pizza = { id: 2, category_id: 3, is_active: 1, stock: 4, variants: [{ id: 11, name: 'S' }, { id: 12, name: 'M' }] };
-  const products = [pizza, { ...pizza, id: 3, category_id: 5 }, { ...pizza, id: 4, stock: 0 }, { ...pizza, id: 5, is_active: 0 }, { ...pizza, id: 6, variants: [{ name: 'Premium' }] }];
+  const pizza = { id: 2, is_pizza: true, category_id: 3, is_active: 1, stock: 4, variants: [{ id: 11, name: 'S' }, { id: 12, name: 'M' }] };
+  const products = [pizza, { ...pizza, id: 3, is_pizza: true, category_id: 5 }, { ...pizza, id: 4, stock: 0 }, { ...pizza, id: 5, is_active: 0 }, { ...pizza, id: 6, variants: [{ name: 'Premium' }] }];
   assert.deepEqual(eligibleManualProducts(products, parent).map(item => item.id), [2]);
   assert.deepEqual(eligibleManualProducts(products, parent, true).map(item => item.id), [2, 3]);
 });
@@ -34,9 +34,9 @@ test('free picker respects availability, valid sizes and separate cross-category
 test('topping prices, quantities and scope match chosen pizza independently', () => {
   const option = { id: 8, is_active: 1, applies_to: 'pizza', small_price: 10, medium_price: 20, large_price: 30, product_ids: '[1]', category_ids: '[7]' };
   assert.equal(staffOptionPrice(option, 'M'), 20);
-  assert.equal(optionApplies(option, { id: 1, category_id: 9 }, 'M'), true);
-  assert.equal(optionApplies(option, { id: 99, category_id: 7 }, 'S'), true);
-  assert.equal(optionApplies(option, { id: 99, category_id: 9 }, 'L'), false);
+  assert.equal(optionApplies(option, { id: 1, is_pizza: true, category_id: 9 }, 'M'), true);
+  assert.equal(optionApplies(option, { id: 99, is_pizza: true, category_id: 7 }, 'S'), true);
+  assert.equal(optionApplies(option, { id: 99, is_pizza: true, category_id: 9 }, 'L'), false);
   assert.equal(optionApplies({ ...option, is_active: 0 }, parent, 'M'), false);
   assert.equal(optionApplies(option, parent, 'Premium'), false);
   assert.deepEqual(optionSelections({ options: [{ id: 8, quantity: 3, price: 20 }] }), [{ id: 8, quantity: 3 }]);
@@ -73,7 +73,7 @@ test('editing retains actual saved delivery prices without inventing a replaceme
 });
 
 const permanentBogo = { id: 0, name: 'Staff BOGO · Every day', staff_always_available: true, buy_qty: 1, get_qty: 1, allowed_free_sizes: { M: ['M', 'S'] }, product_ids: [], category_ids: [], free_product_ids: [], size_rules: {} };
-const automaticSmall = { key: 'bogo:a', id: 2, category_id: 3, variant_name: 'S', quantity: 1, price: 100, stock: 10, is_active: 1, is_bogo_free: true, bogo_parent_key: parent.key };
+const automaticSmall = { key: 'bogo:a', id: 2, is_pizza: true, category_id: 3, variant_name: 'S', quantity: 1, price: 100, stock: 10, is_active: 1, is_bogo_free: true, bogo_parent_key: parent.key };
 
 test('authenticated permanent staff policy offers Medium or Small throughout all seven days', () => {
   for (const day of ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']) {
@@ -94,7 +94,7 @@ test('permanent BOGO only qualifies paid Medium and rejects Large or manual-free
 });
 
 test('automatic free selection retains category, price and availability safeguards', () => {
-  for (const patch of [{ category_id: 9 }, { price: 201 }, { price: NaN }, { stock: 0 }, { is_active: 0 }, { variant_id: 8, variants: [{ id: 8, name: 'S', is_active: 0 }] }]) {
+  for (const patch of [{ is_pizza: true, category_id: 9 }, { price: 201 }, { price: NaN }, { stock: 0 }, { is_active: 0 }, { variant_id: 8, variants: [{ id: 8, name: 'S', is_active: 0 }] }]) {
     assert.equal(staffBogoPairAllowed(permanentBogo, parent, { ...automaticSmall, ...patch }, 'monday'), false);
   }
   // An unchanged existing-order snapshot may retain an archived product/size.
@@ -131,17 +131,17 @@ test('scheduled public offer sizes and scope remain independent from permanent s
 test('saved Staff scopes combine categories and paid products without changing public scope precedence', () => {
   const policy = { ...permanentBogo, category_ids: [8], product_ids: [1] };
   assert.equal(staffBogoOfferForLine(parent, [policy], 'monday'), policy);
-  assert.equal(staffBogoOfferForLine({ ...parent, id: 99, category_id: 8 }, [policy], 'monday'), policy);
-  assert.equal(staffBogoOfferForLine({ ...parent, id: 99, category_id: 3 }, [policy], 'monday'), null);
+  assert.equal(staffBogoOfferForLine({ ...parent, id: 99, is_pizza: true, category_id: 8 }, [policy], 'monday'), policy);
+  assert.equal(staffBogoOfferForLine({ ...parent, id: 99, is_pizza: true, category_id: 3 }, [policy], 'monday'), null);
   const publicOffer = { ...policy, staff_always_available: false };
-  assert.equal(staffBogoOfferForLine({ ...parent, id: 99, category_id: 8 }, [publicOffer], 'monday'), null);
+  assert.equal(staffBogoOfferForLine({ ...parent, id: 99, is_pizza: true, category_id: 8 }, [publicOffer], 'monday'), null);
 });
 
 test('saved free-product choices and free sizes apply within the paid category and price ceiling', () => {
   const selected = { ...permanentBogo, product_ids: [1], free_product_ids: [2], allowed_free_sizes: { M: ['S'] } };
   assert.equal(staffBogoPairAllowed(selected, parent, automaticSmall, 'monday'), true);
   assert.equal(staffBogoPairAllowed(selected, parent, { ...automaticSmall, id: 3 }, 'monday'), false);
-  assert.equal(staffBogoPairAllowed(selected, parent, { ...automaticSmall, category_id: 8 }, 'monday'), false);
+  assert.equal(staffBogoPairAllowed(selected, parent, { ...automaticSmall, is_pizza: true, category_id: 8 }, 'monday'), false);
   assert.equal(staffBogoPairAllowed(selected, parent, { ...automaticSmall, price: 201 }, 'monday'), false);
   assert.equal(staffBogoPairAllowed(selected, parent, { ...automaticSmall, variant_name: 'M' }, 'monday'), false);
   const sameScope = { ...selected, free_product_ids: [] };

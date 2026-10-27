@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
+import { orderCanEdit, loadCatalog } from '../app/_secure/admin-workflows.mjs';
 
 const source = await readFile(new URL('../app/_secure/AdminPanel.jsx', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -12,7 +13,7 @@ function functionSource(name) {
 function fixture() {
   const pending = [];
   const state = { details: null, detailsLoading: false, edit: null, editLoading: false, menu: null, messages: [] };
-  const context = {
+  const context = { orderCanEdit,
     orderDetailsLoadRef: { current: 0 }, orderEditLoadRef: { current: 0 },
     setOrderDetails: value => { state.details = value; },
     setOrderDetailsLoading: value => { state.detailsLoading = value; },
@@ -67,4 +68,26 @@ test('latest editor read wins while normal successful loading preserves details 
   assert.equal(state.menu.items[0].id, 7);
   assert.equal(state.details, null);
   assert.equal(state.editLoading, false);
+});
+
+ test('completed pickup orders cannot open an editable dialog', async () => {
+  const { pending, state, handlers } = fixture();
+  const load = handlers.openOrderEdit({ id: 3 });
+  pending[0].resolve({ order: { id: 3, status: 'picked_up', order_type: 'takeaway' } });
+  await load;
+  assert.equal(state.edit, null);
+  assert.equal(state.editLoading, false);
+  assert.equal(state.messages.length, 1);
+ });
+
+test('catalog pagination includes products beyond the first 200 without duplicate entries', async () => {
+  const calls = [];
+  const result = await loadCatalog(async path => {
+    calls.push(path);
+    const page = Number(new URL(path, 'https://example.test').searchParams.get('page'));
+    return { items: Array.from({ length: page === 1 ? 200 : 7 }, (_, i) => ({ id: (page - 1) * 200 + i + 1 })), pagination: { per_page: 200 } };
+  }, '/admin/products');
+  assert.equal(result.items.length, 207);
+  assert.equal(result.items.at(-1).id, 207);
+  assert.equal(calls.length, 2);
 });

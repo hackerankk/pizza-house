@@ -1,3 +1,5 @@
+import { isPizzaProduct } from '../product-type.mjs';
+
 // Keep order identities and recorded option quantities intact while Admin edits.
 export function idList(value) {
   let list = value;
@@ -9,7 +11,7 @@ export function idList(value) {
 
 export function optionAppliesTo(option, product, variantName) {
   if (!product || Number(option.is_active ?? 1) !== 1) return false;
-  if ((option.applies_to || 'pizza') === 'pizza' && !['S', 'M', 'L'].includes(variantName)) return false;
+  if ((option.applies_to || 'pizza') === 'pizza' && (!isPizzaProduct(product) || !['S', 'M', 'L'].includes(variantName))) return false;
   const categories = idList(option.category_ids);
   const products = idList(option.product_ids);
   return (!categories.length && !products.length) || categories.includes(Number(product.category_id)) || products.includes(Number(product.id));

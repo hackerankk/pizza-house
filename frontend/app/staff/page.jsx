@@ -9,6 +9,8 @@ import { EmptyState, ErrorState, LoadingState } from '../components/AsyncState';
 import OptimizedImage from '../components/OptimizedImage';
 import { scrollBehavior } from '../motion';
 import useDialogFocus from '../components/useDialogFocus';
+import { menuDescription } from '../customer-copy.mjs';
+import { isPizzaProduct } from '../product-type.mjs';
 import StaffBogoPolicyEditor from './StaffBogoPolicyEditor';
 import { eligibleManualProducts, isFreeLine, manualFreeRemaining, optionApplies, optionSelections, reconcileManualFreeCart, reconcileStaffBogoCart, staffBogoAllowedFreeSizes, staffBogoCapacity, staffBogoOfferForLine, staffBogoOfferForPair, staffBogoPairAllowed, staffBogoSelectionSignature, staffBogoSizeCode, staffCartPayload, staffOptionPrice as optionPrice } from './staff-cart.mjs';
 
@@ -52,11 +54,11 @@ function StaffOptionModal({ item, optionGroups, onClose, onAdd }) {
     <div className="option-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
       <div ref={dialogRef} className="option-modal" role="dialog" aria-modal="true" aria-labelledby="staff-options-title" tabIndex={-1}>
         <div className="option-modal-header">
-          <div><h2 id="staff-options-title">{item.name}</h2><p>{item.description}</p></div>
+          <div><h2 id="staff-options-title">{item.name}</h2>{menuDescription(item.description) ? <p>{menuDescription(item.description)}</p> : null}</div>
           <button className="icon-button" onClick={onClose} aria-label="Close options">×</button>
         </div>
         {item._editLine?.order_item_id ? <p className="small-note">The saved price is retained when the size and toppings are unchanged. Changing either uses current menu prices.</p> : null}
-        {variants.length ? <section className="option-section"><h3>Variant / Size</h3><div className="choice-list">{variants.map(v => <label className="choice-row" key={v.id}><input type="radio" checked={Number(variant?.id) === Number(v.id)} onChange={() => { setVariantId(v.id); setSelectedOptions([]); }} /><span>{v.name === 'S' ? 'Small' : v.name === 'M' ? 'Medium' : v.name === 'L' ? 'Large' : v.name}</span><strong>{inr(effectiveVariantPrice(item, v))}</strong></label>)}</div></section> : null}
+        {variants.length ? <section className="option-section"><h3>Variant / Size</h3><div className="choice-list">{variants.map(v => <label className="choice-row" key={v.id}><input type="radio" checked={Number(variant?.id) === Number(v.id)} onChange={() => { setVariantId(v.id); setSelectedOptions([]); }} /><span>{!isPizzaProduct(item) ? (v.name === 'S' ? 'Standard' : v.name) : v.name === 'S' ? 'Small' : v.name === 'M' ? 'Medium' : v.name === 'L' ? 'Large' : v.name}</span><strong>{inr(effectiveVariantPrice(item, v))}</strong></label>)}</div></section> : null}
         {optionRows.length ? <section className="option-section"><h3>Add Toppings / Add-Ons</h3><p className="small-note">Prices are per pizza. Each cart line has its own selections.</p><div className="choice-list">{optionRows.map(option => {
           const selection = selectedOptions.find(row => Number(row.id) === Number(option.id));
           const saved = item._editLine?.options?.find(row => Number(row.id) === Number(option.id));
@@ -82,7 +84,7 @@ function repriceStaffLine(line, freshItems, freshGroups) {
   const optionsById = new Map((freshGroups || []).flatMap(group => (group.options || []).map(option => [String(option.id), { ...option, group_name: group.name }])));
   const options = optionSelections(line).map(selection => { const option = optionsById.get(String(selection.id)); return option ? { ...option, quantity: selection.quantity } : null; }).filter(Boolean);
   const price = effectiveVariantPrice(item, variant) + options.reduce((sum, option) => sum + optionPrice(option, variant?.name) * option.quantity, 0);
-  return { ...line, name: item.name, category_id: item.category_id, stock: item.stock, is_active: item.is_active, variants: item.variants, variant_id: variant?.id || null, variant_name: variant?.name || null, options: options.map(option => ({ ...option, price: optionPrice(option, variant?.name) })), price };
+  return { ...line, name: item.name, is_pizza: isPizzaProduct(item), category_name: item.category_name, category_slug: item.category_slug, category_id: item.category_id, stock: item.stock, is_active: item.is_active, variants: item.variants, variant_id: variant?.id || null, variant_name: variant?.name || null, options: options.map(option => ({ ...option, price: optionPrice(option, variant?.name) })), price };
 }
 
 function staffSizeLabel(name) {
@@ -267,6 +269,7 @@ export default function StaffPage() {
   const [mobileCategoryOpen, setMobileCategoryOpen] = useState(false);
   const categoryDialogRef = useDialogFocus(mobileCategoryOpen, () => setMobileCategoryOpen(false));
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
+  const cartDialogRef = useDialogFocus(mobileCartOpen, () => setMobileCartOpen(false));
   const [orderType, setOrderType] = useState('takeaway');
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [discountOpen, setDiscountOpen] = useState(false);
@@ -1015,8 +1018,8 @@ export default function StaffPage() {
         ) : null}
         {paymentMethod === 'split' ? (
           <>
-            <input className="staff-input" type="number" min="0" step="0.01" placeholder="Cash received" value={cashReceived} disabled={editingOrderId != null} onChange={e => setCashReceived(e.target.value)} />
-            <input className="staff-input" type="number" min="0" step="0.01" placeholder="Online received" value={onlineReceived} disabled={editingOrderId != null} onChange={e => setOnlineReceived(e.target.value)} />
+            <input className="staff-input" type="number" min="0" step="0.01" aria-label="Cash received" placeholder="Cash received" value={cashReceived} disabled={editingOrderId != null} onChange={e => setCashReceived(e.target.value)} />
+            <input className="staff-input" type="number" min="0" step="0.01" aria-label="Online received" placeholder="Online received" value={onlineReceived} disabled={editingOrderId != null} onChange={e => setOnlineReceived(e.target.value)} />
             <p className="small-note">Only split payment uses manual amounts. Counter online means UPI/card/bank app collected at the counter.{editingOrderId != null ? ' Recorded received amounts stay unchanged while editing; only the remaining balance is recomputed.' : ''}</p>
           </>
         ) : null}
@@ -1157,7 +1160,7 @@ export default function StaffPage() {
         <em>View Cart</em>
       </button>
       {mobileCategoryOpen ? <div className="staff-mobile-drawer-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setMobileCategoryOpen(false); }}><aside ref={categoryDialogRef} className="staff-mobile-category-drawer" role="dialog" aria-modal="true" aria-label="Menu categories" tabIndex={-1}><div className="staff-drawer-head"><h2>Categories</h2><button className="icon-button" aria-label="Close categories" onClick={() => setMobileCategoryOpen(false)}><X size={18} /></button></div>{categoryButtons}</aside></div> : null}
-      {mobileCartOpen ? <div className="staff-mobile-drawer-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setMobileCartOpen(false); }}><section className="staff-mobile-cart-sheet"><div className="staff-drawer-head"><h2>Checkout</h2><button className="icon-button" onClick={() => setMobileCartOpen(false)}><X size={18} /></button></div>{cartPanel}</section></div> : null}
+      {mobileCartOpen ? <div className="staff-mobile-drawer-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setMobileCartOpen(false); }}><section ref={cartDialogRef} className="staff-mobile-cart-sheet" role="dialog" aria-modal="true" aria-labelledby="staff-cart-title" tabIndex={-1}><div className="staff-drawer-head"><h2 id="staff-cart-title">Checkout</h2><button className="icon-button" aria-label="Close checkout" onClick={() => setMobileCartOpen(false)}><X size={18} /></button></div>{cartPanel}</section></div> : null}
       <StaffOptionModal key={modalItem ? `staff-product-${modalItem.id}` : 'staff-product-none'} item={modalItem} optionGroups={optionGroups} onClose={() => setModalItem(null)} onAdd={addLine} />
       <StaffManualFreeModal key={manualFreeParent?.key || 'manual-free-closed'} parent={manualFreeParent} items={items} categories={categories} crossCategory={permissions.free_pizza_cross_category} onClose={() => setManualFreeParent(null)} onAdd={addLine} />
       <StaffBogoModal key={bogoPicker ? `staff-bogo-${bogoPicker.line?.key}-${bogoPicker.offer?.id}` : 'staff-bogo-none'} unlock={bogoPicker} items={items} categories={categories} weekday={activeBogoWeekday} onClose={() => setBogoPicker(null)} onAdd={addLine} />

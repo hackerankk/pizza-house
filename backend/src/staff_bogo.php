@@ -1,5 +1,6 @@
 <?php
 declare(strict_types=1);
+require_once __DIR__ . '/product_type.php';
 
 // This private Staff POS policy never changes scheduled public/customer offers.
 function staff_bogo_default_config(): array {
@@ -44,6 +45,17 @@ function staff_bogo_config(array $policy, bool $validateProducts = false): array
         }
         $query = db()->prepare($sql); $query->execute($ids);
         if ((int)$query->fetchColumn() !== count($config[$key])) throw new ApiException('Select active pizza categories/products with an eligible size',422);
+        $selectedIds = $config[$key];
+        $classificationSql = $key === 'category_ids'
+            ? "SELECT p.*, c.name AS category_name, c.slug AS category_slug FROM menu_items p JOIN categories c ON c.id=p.category_id WHERE c.id IN ($placeholders) AND p.is_active=1 AND EXISTS (SELECT 1 FROM menu_item_variants v WHERE v.menu_item_id=p.id AND v.is_active=1 AND v.name='M' AND (CASE WHEN v.price>0 THEN v.price ELSE p.price END)>0)"
+            : "SELECT p.*, c.name AS category_name, c.slug AS category_slug FROM menu_items p JOIN categories c ON c.id=p.category_id WHERE p.id IN ($placeholders)";
+        $classification = db()->prepare($classificationSql); $classification->execute($selectedIds);
+        $eligibleIds = [];
+        foreach ($classification->fetchAll() as $product) {
+            if (product_is_pizza($product)) $eligibleIds[(int)$product[$key === 'category_ids' ? 'category_id' : 'id']] = true;
+        }
+        if (count($eligibleIds) !== count($selectedIds)) throw new ApiException('Select pizza products or categories for Staff BOGO',422);
+
     }
     return $config;
 }
@@ -104,6 +116,7 @@ function staff_bogo_product_in_scope(array $product, array $policy): bool {
     return (!$categories && !$products) || in_array((int)$product['id'],$products,true) || in_array((int)$product['category_id'],$categories,true);
 }
 function staff_bogo_pair_allowed_by_policy(array $paid, array $free, array $policy): bool {
+    if (!product_is_pizza($paid['item']) || !product_is_pizza($free['item'])) return false;
     if (!empty($paid['is_bogo_free']) || !empty($paid['is_manual_free']) || !empty($free['is_manual_free'])) return false;
     $paidSize = pizza_size_code((string)($paid['variant']['name'] ?? '')); $freeSize = pizza_size_code((string)($free['variant']['name'] ?? ''));
     $categoryId = (int)($paid['item']['category_id'] ?? 0); $freeProducts = $policy['free_product_ids'];

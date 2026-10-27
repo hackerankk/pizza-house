@@ -36,7 +36,7 @@ test('removing a paid line removes only its own linked free children', () => {
 });
 
 test('option filtering honors pizza type, active status and category or specific-product eligibility', () => {
-  const product = { id: 9, category_id: 4 };
+  const product = { id: 9, is_pizza: true, category_id: 4 };
   assert.equal(optionAppliesTo({ applies_to: 'pizza' }, product, 'M'), true);
   assert.equal(optionAppliesTo({ applies_to: 'pizza' }, product, 'Premium'), false);
   assert.equal(optionAppliesTo({ applies_to: 'all', category_ids: '[4]', product_ids: [9] }, product, 'Premium'), true);

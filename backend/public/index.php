@@ -6,6 +6,7 @@ require_once dirname(__DIR__) . '/src/uploads.php';
 require_once dirname(__DIR__) . '/src/security_headers.php';
 require_once dirname(__DIR__) . '/src/invoice_mail.php';
 require_once dirname(__DIR__) . '/src/staff_pos.php';
+require_once dirname(__DIR__) . '/src/order_state.php';
 require_once dirname(__DIR__) . '/src/staff_bogo.php';
 
 ini_set('display_errors', '0');
@@ -576,6 +577,7 @@ function status_label(string $status): string {
 }
 
 function valid_next_statuses(string $current, string $orderType, string $source = 'customer_online'): array {
+    if (order_is_terminal(['status'=>$current, 'order_type'=>$orderType])) return [];
     if ($source === 'staff_offline') {
         $flow = ['received', 'accepted', 'ready', 'delivered'];
         if ($current === 'cancelled' || $current === 'delivered') {
@@ -1779,6 +1781,7 @@ function matching_bogo_offer(array $paidLine, array $freeLine, ?DateTimeImmutabl
         $freeSize = pizza_size_code($freeLine['variant']['name'] ?? '');
         $dayRules = bogo_day_rules($offer, $day);
         if ($dayRules !== null) {
+            if (!product_is_pizza($paidLine['item']) || !product_is_pizza($freeLine['item'])) continue;
             if (!array_key_exists($paidSize, $dayRules) || trim((string)$dayRules[$paidSize]) === '') continue;
             $mappedFreeSize = pizza_size_code((string)$dayRules[$paidSize]);
             if (!in_array($mappedFreeSize, ['S', 'M', 'L'], true) || $mappedFreeSize !== $freeSize) continue;
@@ -1870,7 +1873,7 @@ function advanced_bogo_discount(array $lines, float $subtotal): array {
         $eligibleBySize = ['S' => 0, 'M' => 0, 'L' => 0];
         $qualifiedQtyBySize = ['S' => 0, 'M' => 0, 'L' => 0];
         foreach ($lines as $line) {
-            if (!advanced_bogo_applies_to_line($offer, $line)) continue;
+            if (!product_is_pizza($line['item']) || !advanced_bogo_applies_to_line($offer, $line)) continue;
             $buySize = pizza_size_code($line['variant']['name'] ?? '');
             $freeSize = pizza_size_code($dayRules[$buySize] ?? '');
             if (!in_array($buySize, ['S','M','L'], true) || !in_array($freeSize, ['S','M','L'], true)) continue;
@@ -1884,7 +1887,7 @@ function advanced_bogo_discount(array $lines, float $subtotal): array {
                 : intdiv($qty, $buyQty) * $getQty;
         }
         foreach ($lines as $line) {
-            if (!advanced_bogo_applies_to_line($offer, $line)) continue;
+            if (!product_is_pizza($line['item']) || !advanced_bogo_applies_to_line($offer, $line)) continue;
             $size = pizza_size_code($line['variant']['name'] ?? '');
             $freeQty = min((int)$line['quantity'], (int)($eligibleBySize[$size] ?? 0));
             if ($freeQty <= 0) continue;
@@ -2435,7 +2438,7 @@ function invoice_payload(array $order): array {
 
 function editable_order_payload(array $order): array {
     $payload = order_tracking_payload($order);
-    $payload['can_edit'] = !in_array($order['status'] ?? '', ['out_for_delivery', 'delivered', 'cancelled'], true);
+    $payload['can_edit'] = order_can_edit($order);
     return $payload;
 }
 
@@ -2530,8 +2533,8 @@ function payment_state_after_order_edit(array $order, float $total): array {
 }
 
 function apply_order_item_edit(array $order, array $items, int $actorId, string $actorLabel, ?array $paymentInput = null, ?array $discountInput = null, ?array $metaInput = null): array {
-    if (in_array($order['status'] ?? '', ['out_for_delivery', 'delivered', 'cancelled'], true)) {
-        json_response(['error' => 'Orders already out for delivery, delivered, or cancelled cannot be edited'], 422);
+    if (!order_can_edit($order)) {
+        json_response(['error' => 'Completed, cancelled, or out-for-delivery orders cannot be edited'], 422);
     }
     $items = normalized_edit_items($items);
     $pdo = db();
@@ -2546,8 +2549,8 @@ function apply_order_item_edit(array $order, array $items, int $actorId, string 
         if (($lockedOrder['updated_at'] ?? null) !== ($order['updated_at'] ?? null) && ($lockedOrder['status'] ?? '') !== ($order['status'] ?? '')) {
             throw new ApiException('Order changed. Please refresh and retry.', 409);
         }
-        if (in_array($lockedOrder['status'] ?? '', ['out_for_delivery', 'delivered', 'cancelled'], true)) {
-            throw new ApiException('Orders already out for delivery, delivered, or cancelled cannot be edited', 422);
+        if (!order_can_edit($lockedOrder)) {
+            throw new ApiException('Completed, cancelled, or out-for-delivery orders cannot be edited', 422);
         }
 
         $oldItemsStmt = $pdo->prepare('SELECT * FROM order_items WHERE order_id=? FOR UPDATE');
@@ -3405,6 +3408,8 @@ if ($path === '/menu' && $method === 'GET') {
         $variants = [];
     }
     $items = array_map(function (array $item) use ($variants): array {
+        $item = product_type_metadata($item);
+        $item['is_pizza'] = product_is_pizza($item);
         $item['variants'] = $variants[(int)$item['id']] ?? [];
         return $item;
     }, $items);
@@ -4249,9 +4254,9 @@ if (str_starts_with($path, '/admin')) {
             COALESCE(SUM(GREATEST(COALESCE(o.cash_received,0)-COALESCE(o.change_amount,o.cash_change,0),0)),0) AS cash_sales,
             COALESCE(SUM(COALESCE(o.online_received,0)),0) AS counter_digital_sales,
             COALESCE(SUM(CASE WHEN o.payment_status='Partially Paid' THEN 1 ELSE 0 END),0) AS partial_payment_orders,
-            COALESCE(SUM(CASE WHEN o.status='delivered' THEN 1 ELSE 0 END),0) AS completed_orders,
+            COALESCE(SUM(CASE WHEN (o.status='delivered' OR (o.status='picked_up' AND o.order_type IN ('takeaway','dine_in'))) THEN 1 ELSE 0 END),0) AS completed_orders,
             COALESCE(SUM(CASE WHEN o.status='cancelled' THEN 1 ELSE 0 END),0) AS cancelled_orders,
-            COALESCE(SUM(CASE WHEN o.status NOT IN ('delivered','cancelled') THEN 1 ELSE 0 END),0) AS pending_orders,
+            COALESCE(SUM(CASE WHEN o.status NOT IN ('delivered','cancelled') AND NOT (o.status='picked_up' AND o.order_type IN ('takeaway','dine_in')) THEN 1 ELSE 0 END),0) AS pending_orders,
             COALESCE(SUM(CASE WHEN o.coupon_id IS NOT NULL THEN 1 ELSE 0 END),0) AS coupon_orders,
             COALESCE(SUM(CASE WHEN o.discount_type LIKE '%bogo%' THEN 1 ELSE 0 END),0) AS bogo_orders,
             COALESCE(SUM(CASE WHEN o.discount_type LIKE '%bogo%' THEN o.discount_amount ELSE 0 END),0) AS bogo_discount,
@@ -4349,8 +4354,8 @@ if (str_starts_with($path, '/admin')) {
             'today_cash_sales' => (float)$todayScalar("SELECT COALESCE(SUM(GREATEST(COALESCE(cash_received,0)-COALESCE(change_amount,cash_change,0),0)),0) FROM orders WHERE created_at >= ? AND created_at < ? AND source='staff_offline'", $todayParams),
             'today_counter_online_sales' => (float)$todayScalar("SELECT COALESCE(SUM(online_received),0) FROM orders WHERE created_at >= ? AND created_at < ? AND source='staff_offline'", $todayParams),
             'today_average_order' => (float)$todayScalar("SELECT COALESCE(AVG(total_amount),0) FROM orders WHERE created_at >= ? AND created_at < ?", $todayParams),
-            'today_pending_orders' => (int)$todayScalar("SELECT COUNT(*) FROM orders WHERE created_at >= ? AND created_at < ? AND status NOT IN ('delivered','cancelled')", $todayParams),
-            'today_completed_orders' => (int)$todayScalar("SELECT COUNT(*) FROM orders WHERE created_at >= ? AND created_at < ? AND status='delivered'", $todayParams),
+            'today_pending_orders' => (int)$todayScalar("SELECT COUNT(*) FROM orders WHERE created_at >= ? AND created_at < ? AND status NOT IN ('delivered','cancelled') AND NOT (status='picked_up' AND order_type IN ('takeaway','dine_in'))", $todayParams),
+            'today_completed_orders' => (int)$todayScalar("SELECT COUNT(*) FROM orders WHERE created_at >= ? AND created_at < ? AND (status='delivered' OR (status='picked_up' AND order_type IN ('takeaway','dine_in')))", $todayParams),
             'staff_orders_today' => (int)$todayScalar("SELECT COUNT(*) FROM orders WHERE created_at >= ? AND created_at < ? AND source='staff_offline'", $todayParams),
             'customer_online_orders_today' => (int)$todayScalar("SELECT COUNT(*) FROM orders WHERE created_at >= ? AND created_at < ? AND source='customer_online'", $todayParams),
             'pending_payments' => (float)db()->query("SELECT COALESCE(SUM(remaining_amount),0) FROM orders WHERE remaining_amount > 0")->fetchColumn(),

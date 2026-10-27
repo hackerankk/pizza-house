@@ -1,5 +1,7 @@
 'use client';
 
+import { publicPickupAddress } from '../customer-copy.mjs';
+
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -668,7 +670,7 @@ function CheckoutContent() {
       <section className="container checkout-hero">
         <span className="eyebrow">Secure checkout</span>
         <h1>Complete your order</h1>
-        <p>Select delivery or takeaway, confirm customer details, and pay through the server-verified Razorpay flow.</p>
+        <p>Choose delivery or takeaway, check your details, and complete your order securely.</p>
       </section>
 
       <div className="container">{message ? <Toast tone={messageType} onDismiss={() => setMessage('')}>{message}</Toast> : null}</div>
@@ -758,7 +760,7 @@ function CheckoutContent() {
               <div className="section-kicker"><Store size={16} /> Pickup information</div>
               <div className="pickup-card">
                 <strong>{settings.restaurant_name || 'The Pizza House'}</strong>
-                <p>{settings.restaurant_address || 'Restaurant pickup address is managed in admin settings.'}</p>
+                <p>{publicPickupAddress(settings.restaurant_address) || 'Please confirm the pickup address with the restaurant before ordering.'}</p>
                 <small>Pickup instructions: arrive after confirmation and share your order number at the counter.</small>
               </div>
               <p className="small-note">Takeaway orders require full payment. Delivery address, map, distance, and delivery charges are not used.</p>
@@ -807,7 +809,7 @@ function CheckoutContent() {
             <div><span>Remaining</span><strong>{inr(paymentMode === 'cod' ? total : remaining)}</strong></div>
           </div>
           <button className="full-width mobile-sticky-cta" onClick={placeOrder} disabled={loading || (!cart.length && !pendingPayment) || (storeStatus && !storeStatus.is_open) || selectedOrderTypeDisabled || selectedPaymentDisabled}>{loading ? <Loader2 className="spin" size={16} /> : <CreditCard size={16} />}{loading ? 'Processing payment...' : storeStatus && !storeStatus.is_open ? 'Ordering Closed' : selectedOrderTypeDisabled ? 'Order Type Unavailable' : selectedPaymentDisabled ? 'Payment Unavailable' : pendingPayment ? 'Retry original order payment' : cta}</button>
-          <p className="small-note">Prices, stock, coupon, BOGO, delivery, payment mode, and Razorpay verification are enforced by the PHP backend.</p>
+          <p className="small-note">Review your items and total before placing your order.</p>
         </aside>
       </section>
     </main>

@@ -3916,8 +3916,8 @@ button.promo-banner-link {
   .menu-tools { grid-template-columns: 1fr; }
   .category-tabs { justify-content: flex-start; }
   .admin-shell { grid-template-columns: 1fr; }
-  .admin-sidebar { position: fixed; inset: 0 auto 0 0; width: min(310px, 88vw); z-index: 70; transform: translateX(-105%); transition: transform .2s ease; }
-  .admin-sidebar.open { transform: translateX(0); box-shadow: var(--shadow); }
+  .admin-sidebar { position: fixed; inset: 0 auto 0 0; width: min(310px, 88vw); z-index: 70; visibility: hidden; transform: translateX(-105%); transition: transform .2s ease; }
+  .admin-sidebar.open { visibility: visible; transform: translateX(0); box-shadow: var(--shadow); }
   .admin-drawer-backdrop {
     position: fixed;
     inset: 0;
@@ -4792,3 +4792,27 @@ html[data-color-scheme="dark"] button.app-toast-dismiss:hover { background: rgb(
     grid-template-columns: 1fr;
   }
 }
+
+/* Phone menus use the existing category picker, leaving readable product cards. */
+@media (max-width: 767px) {
+  .food-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .menu-category-sidebar { display: none; }
+  .mobile-category-button { display: inline-flex; min-height: 44px; }
+  .food-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .food-card { grid-template-columns: 1fr; grid-template-rows: 120px minmax(125px, auto); min-height: 0; padding: 12px; gap: 24px; }
+  .food-card-media, .food-card-media img { min-height: 120px; }
+  .food-card-copy h3 { font-size: 16px; line-height: 1.3; }
+  .food-card-copy p, .stock-note { font-size: 13px; line-height: 1.4; }
+  .food-card .price { font-size: 17px; }
+  .add-float { min-width: 88px; min-height: 44px; padding: 9px 12px; font-size: 14px; }
+}
+@media (max-width: 420px) {
+  .food-list { grid-template-columns: 1fr; }
+  .food-card { grid-template-columns: minmax(0, 1fr) 112px; grid-template-rows: auto; min-height: 160px; gap: 12px; }
+  .food-card-copy { order: 1; }
+  .food-card-media { order: 2; margin-bottom: 12px; }
+}
+@media (min-width: 768px) and (max-width: 1020px) {
+  .admin-topbar .mobile-only, .admin-sidebar .mobile-only { display: inline-flex; }
+}
+html[data-color-scheme="dark"] .stock-note:not(.sold-out) { color: #86efac; }
