@@ -304,14 +304,14 @@ function CartPanel({ cart, subtotal, couponCode, onCoupon, onQty, onEdit, onChoo
           ))}
         </div>
       </div>
-      <div className="menu-cart-footer !shrink-0 lg:!gap-1 lg:!pt-1">
+      <div className="menu-cart-footer !shrink-0 lg:!gap-2 lg:!pt-2">
         <input aria-label="Coupon code" maxLength={100} className="lg:!min-h-9 lg:!py-1" placeholder="Coupon code" value={couponCode} onChange={e => onCoupon(e.target.value)} />
-        <div className="totals compact lg:!grid lg:!grid-cols-2 lg:!gap-1">
-          <div className="lg:!grid lg:!gap-0 lg:!py-0.5 lg:!text-[11px]"><span>Subtotal</span><strong>{inr(subtotal)}</strong></div>
-          {bogoDiscount > 0 ? <div className="lg:!grid lg:!gap-0 lg:!py-0.5 lg:!text-[11px]"><span>BOGO Savings</span><strong>-{inr(bogoDiscount)}</strong></div> : null}
-          <div className="lg:!grid lg:!gap-0 lg:!py-0.5 lg:!text-[11px]"><span>Coupon</span><strong>Checkout</strong></div>
-          <div className="lg:!grid lg:!gap-0 lg:!py-0.5 lg:!text-[11px]"><span>Delivery</span><strong>Checkout</strong></div>
-          <div className="grand lg:!col-span-2 lg:!p-1.5"><span>Estimated Total</span><strong>{inr(Math.max(subtotal, 0))}</strong></div>
+        <div className="totals compact lg:!grid lg:!grid-cols-2 lg:!gap-2">
+          <div className="menu-cart-total-row lg:!grid lg:!gap-1 lg:!py-1"><span>Subtotal</span><strong>{inr(subtotal)}</strong></div>
+          {bogoDiscount > 0 ? <div className="menu-cart-total-row lg:!grid lg:!gap-1 lg:!py-1"><span>BOGO Savings</span><strong>-{inr(bogoDiscount)}</strong></div> : null}
+          <div className="menu-cart-total-row lg:!grid lg:!gap-1 lg:!py-1"><span>Coupon</span><strong>Checkout</strong></div>
+          <div className="menu-cart-total-row lg:!grid lg:!gap-1 lg:!py-1"><span>Delivery</span><strong>Checkout</strong></div>
+          <div className="grand lg:!col-span-2 lg:!p-2.5"><span>Estimated Total</span><strong>{inr(Math.max(subtotal, 0))}</strong></div>
         </div>
         <Link className={cart.length ? 'button full-width cart-checkout-button lg:!min-h-9 lg:!py-1.5 lg:!text-sm' : 'button full-width disabled-link cart-checkout-button lg:!min-h-9 lg:!py-1.5 lg:!text-sm'} href={cart.length ? '/checkout' : '#menu'}>Checkout <ChevronRight size={18} /></Link>
       </div>

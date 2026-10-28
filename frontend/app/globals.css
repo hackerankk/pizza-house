@@ -3766,6 +3766,43 @@ button.promo-banner-link {
   color: var(--primary-color);
 }
 
+@media (min-width: 1021px) {
+  .menu-cart-footer .totals.compact {
+    gap: 8px 10px;
+  }
+
+  .menu-cart-footer .totals.compact .menu-cart-total-row {
+    min-height: 34px;
+    padding: 4px 0;
+    line-height: 1.25;
+  }
+
+  .menu-cart-footer .totals.compact .menu-cart-total-row span {
+    font-size: 13px;
+    line-height: 1.25;
+  }
+
+  .menu-cart-footer .totals.compact .menu-cart-total-row strong {
+    font-size: 15px;
+    line-height: 1.25;
+  }
+
+  .menu-cart-footer .totals.compact .grand {
+    margin-top: 4px;
+    padding: 10px 12px;
+  }
+
+  .menu-cart-footer .totals.compact .grand span {
+    font-size: 13px;
+    line-height: 1.25;
+  }
+
+  .menu-cart-footer .totals.compact .grand strong {
+    font-size: 20px;
+    line-height: 1.2;
+  }
+}
+
 .cart-checkout-button {
   min-height: 42px;
   font-size: 16px;
