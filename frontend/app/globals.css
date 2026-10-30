@@ -3666,9 +3666,13 @@ button.promo-banner-link {
   overscroll-behavior: contain;
 }
 
-.menu-cart-card .menu-cart-scroll-area {
+#cart .menu-cart-scroll-area {
   flex: 0 0 auto !important;
-  overflow: visible !important;
+  height: auto !important;
+  min-height: max-content !important;
+  max-height: none !important;
+  overflow-x: visible !important;
+  overflow-y: visible !important;
 }
 
 .menu-cart-footer {
