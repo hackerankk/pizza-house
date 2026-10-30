@@ -50,12 +50,6 @@ function StaffOptionModal({ item, optionGroups, onClose, onAdd }) {
     setSelectedOptions(current => checked ? [...current.filter(value => Number(value.id) !== Number(id)), { id: Number(id), quantity: 1 }] : current.filter(value => Number(value.id) !== Number(id)));
   }
 
-  function changeOptionQuantity(id, delta) {
-    setSelectedOptions(current => current.map(option => Number(option.id) === Number(id)
-      ? { ...option, quantity: Math.max(1, Math.min(20, Number(option.quantity || 1) + delta)) }
-      : option));
-  }
-
   return (
     <div className="option-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
       <div ref={dialogRef} className="option-modal" role="dialog" aria-modal="true" aria-labelledby="staff-options-title" tabIndex={-1}>
@@ -65,22 +59,15 @@ function StaffOptionModal({ item, optionGroups, onClose, onAdd }) {
         </div>
         {item._editLine?.order_item_id ? <p className="small-note">The saved price is retained when the size and toppings are unchanged. Changing either uses current menu prices.</p> : null}
         {variants.length ? <section className="option-section"><h3>Variant / Size</h3><div className="choice-list">{variants.map(v => <label className="choice-row" key={v.id}><input type="radio" checked={Number(variant?.id) === Number(v.id)} onChange={() => { setVariantId(v.id); setSelectedOptions([]); }} /><span>{!isPizzaProduct(item) ? (v.name === 'S' ? 'Standard' : v.name) : v.name === 'S' ? 'Small' : v.name === 'M' ? 'Medium' : v.name === 'L' ? 'Large' : v.name}</span><strong>{inr(effectiveVariantPrice(item, v))}</strong></label>)}</div></section> : null}
-        {optionRows.length ? <section className="option-section"><h3>Add Toppings / Add-Ons</h3><p className="small-note">Prices are per pizza and per topping. Use − / + to set the amount on each pizza.</p><div className="choice-list">{optionRows.map(option => {
+        {optionRows.length ? <section className="option-section"><h3>Add Toppings / Add-Ons</h3><p className="small-note">Select toppings or add-ons for this pizza.</p><div className="choice-list">{optionRows.map(option => {
           const selection = selectedOptions.find(row => Number(row.id) === Number(option.id));
           const saved = item._editLine?.options?.find(row => Number(row.id) === Number(option.id));
           const price = unchangedSelection && saved ? Number(saved.price) : optionPrice(option, variant?.name);
-          const optionQuantity = Math.max(1, Number(selection?.quantity || 1));
-          return <div className="choice-row staff-option-row" key={option.id}>
-            <label className="staff-option-label"><input type="checkbox" checked={Boolean(selection)} disabled={option.historical_only && !selection} onChange={e => toggleOption(option.id, e.target.checked)} /> <span>{option.group_name ? `${option.group_name}: ` : ''}{option.name}{option.historical_only ? ' (saved selection, no longer available)' : ''}</span></label>
-            <div className="staff-option-actions">
-              <strong className="staff-option-price">+{inr(price)} each</strong>
-              {selection ? <div className="staff-option-stepper" aria-label={`${option.name} quantity per pizza`}>
-                <button type="button" aria-label={`Decrease ${option.name} quantity`} disabled={optionQuantity <= 1} onClick={() => changeOptionQuantity(option.id, -1)}>−</button>
-                <span aria-live="polite">{optionQuantity}</span>
-                <button type="button" aria-label={`Increase ${option.name} quantity`} disabled={optionQuantity >= 20} onClick={() => changeOptionQuantity(option.id, 1)}>+</button>
-              </div> : null}
-            </div>
-          </div>;
+          return <label className="choice-row" key={option.id}>
+            <input type="checkbox" checked={Boolean(selection)} disabled={option.historical_only && !selection} onChange={e => toggleOption(option.id, e.target.checked)} />
+            <span>{option.group_name ? `${option.group_name}: ` : ''}{option.name}{option.historical_only ? ' (saved selection, no longer available)' : ''}</span>
+            <strong>+{inr(price)}</strong>
+          </label>;
         })}</div>{unavailableSelection ? <p role="alert" className="notice warning">Remove unavailable saved toppings before changing this item.</p> : null}</section> : <p className="small-note">No toppings or add-ons are configured for this product.</p>}
         <div className="option-modal-footer">
           <div className="quantity-control"><button aria-label="Decrease quantity" onClick={() => setQuantity(q => Math.max(1, q - 1))}><Minus size={14} /></button><strong>{quantity}</strong><button aria-label="Increase quantity" disabled={Boolean(item._editLine?.is_manual_free) || quantity >= availableQuantity} onClick={() => setQuantity(q => Math.min(availableQuantity, q + 1))}><Plus size={14} /></button></div>
@@ -960,7 +947,7 @@ export default function StaffPage() {
             <div>
               <strong>{line.name} {isFreeLine(line) ? <span className="bogo-free-badge">FREE</span> : null}</strong>
               {line.variant_name ? <p>{staffSizeLabel(line.variant_name)}{line.is_manual_free ? ' · Staff promotion' : line.is_bogo_free ? ' · Automatic BOGO' : ''}</p> : null}
-              {line.options?.length ? <ul className="small-note">{line.options.map(option => <li key={option.id}>{option.name} × {Number(option.quantity || 1)} · +{inr(Number(option.price || 0) * Number(option.quantity || 1))} per pizza</li>)}</ul> : null}
+              {line.options?.length ? <ul className="small-note">{line.options.map(option => <li key={option.id}>{option.name} · +{inr(Number(option.price || 0))} per pizza</li>)}</ul> : null}
               {isFreeLine(line) ? <p className="small-note">Regular {inr(Number(line.price) * Number(line.quantity))} · Discount −{inr(Number(line.price) * Number(line.quantity))} · Payable {inr(0)}</p> : null}
             </div>
             <div className="staff-cart-actions">
