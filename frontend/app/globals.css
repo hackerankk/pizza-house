@@ -4876,7 +4876,7 @@ html[data-color-scheme="dark"] .stock-note:not(.sold-out) { color: #86efac; }
     overflow-y: auto !important;
   }
 
-  .menu-cart-scroll-area {
+  .menu-cart-card .menu-cart-scroll-area {
     flex: 0 0 auto !important;
     overflow: visible !important;
   }
