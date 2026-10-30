@@ -153,9 +153,13 @@ function repriceCartLine(line, freshItems, freshGroups) {
   if (!item) return line;
   const variant = (item.variants || []).find(v => String(v.id) === String(line.variant_id)) || (item.variants || []).find(v => Number(v.is_default) === 1) || (item.variants || [])[0] || null;
   const optionsById = new Map((freshGroups || []).flatMap(group => (group.options || []).map(option => [String(option.id), { ...option, group_name: group.name }])));
-  const options = (line.option_ids || []).map(id => optionsById.get(String(id))).filter(option => option && optionAvailableForProduct(option, item, variant));
-  const price = effectiveVariantPrice(item, variant) + options.reduce((sum, option) => sum + cartOptionPrice(option, variant?.name), 0);
-  return { ...line, name: item.name, is_pizza: isPizzaProduct(item), category_name: item.category_name, category_slug: item.category_slug, category_id: item.category_id, stock: item.stock, variant_id: variant?.id || null, variant_name: variant?.name || null, option_ids: options.map(option => Number(option.id)), options: options.map(option => ({ ...option, price: cartOptionPrice(option, variant?.name) })), price };
+  const priorSelections = Array.isArray(line.option_selections) ? line.option_selections : (line.options?.length ? line.options : (line.option_ids || []).map(id => ({ id, quantity: 1 })));
+  const quantitiesById = new Map(priorSelections.map(option => [String(option.id), Math.max(1, Math.min(20, Number(option.quantity || 1)))]));
+  const options = (line.option_ids || []).map(id => optionsById.get(String(id))).filter(option => option && optionAvailableForProduct(option, item, variant)).map(option => ({ ...option, quantity: quantitiesById.get(String(option.id)) || 1 }));
+  const price = effectiveVariantPrice(item, variant) + options.reduce((sum, option) => sum + cartOptionPrice(option, variant?.name) * option.quantity, 0);
+  const optionIds = options.map(option => Number(option.id));
+  const optionSelections = options.map(option => ({ id: Number(option.id), quantity: option.quantity }));
+  return { ...line, name: item.name, is_pizza: isPizzaProduct(item), category_name: item.category_name, category_slug: item.category_slug, category_id: item.category_id, stock: item.stock, variant_id: variant?.id || null, variant_name: variant?.name || null, option_ids: optionIds, option_selections: optionSelections, options: options.map(option => ({ ...option, price: cartOptionPrice(option, variant?.name) })), price };
 }
 
 function sameCart(a, b) {
@@ -242,8 +246,8 @@ function CartPanel({ cart, subtotal, couponCode, onCoupon, onQty, onEdit, onChoo
     const toppings = (line.options || []).filter(option => String(option.group_name || '').toLowerCase().includes('topping'));
     const addons = (line.options || []).filter(option => !String(option.group_name || '').toLowerCase().includes('crust') && !String(option.group_name || '').toLowerCase().includes('topping'));
     if (crust) parts.push(`Crust: ${crust.name}`);
-    if (toppings.length) parts.push(`Toppings: ${toppings.map(option => option.name).join(', ')}`);
-    if (addons.length) parts.push(`Add-ons: ${addons.map(option => option.name).join(', ')}`);
+    if (toppings.length) parts.push(`Toppings: ${toppings.map(option => `${option.name}${Number(option.quantity || 1) > 1 ? ` ×${option.quantity}` : ''}`).join(', ')}`);
+    if (addons.length) parts.push(`Add-ons: ${addons.map(option => `${option.name}${Number(option.quantity || 1) > 1 ? ` ×${option.quantity}` : ''}`).join(', ')}`);
     return parts.join(' | ');
   }
   return (
@@ -453,12 +457,14 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
   const [variantId, setVariantId] = useState(item?._editLine?.variant_id || firstVariant?.id || null);
   const [crustId, setCrustId] = useState(item?._editLine?.options?.find(option => option.group_name?.toLowerCase() === 'crust')?.id || 'regular');
   const [toppingIds, setToppingIds] = useState(item?._editLine?.options?.filter(option => option.group_name?.toLowerCase().includes('topping')).map(option => Number(option.id)) || []);
+  const [toppingQuantities, setToppingQuantities] = useState(() => Object.fromEntries((item?._editLine?.options || []).filter(option => option.group_name?.toLowerCase().includes('topping')).map(option => [Number(option.id), Math.max(1, Math.min(20, Number(option.quantity || 1)))])));
   const [quantity, setQuantity] = useState(item?._editLine?.quantity || 1);
   useEffect(() => {
     const selected = variants.find(variant => String(variant.id) === String(item?._editLine?.variant_id)) || variants.find(variant => Number(variant.is_default) === 1) || variants[0];
     setVariantId(selected?.id || null);
     setCrustId(item?._editLine?.options?.find(option => option.group_name?.toLowerCase() === 'crust')?.id || 'regular');
     setToppingIds(item?._editLine?.options?.filter(option => option.group_name?.toLowerCase().includes('topping')).map(option => Number(option.id)) || []);
+    setToppingQuantities(Object.fromEntries((item?._editLine?.options || []).filter(option => option.group_name?.toLowerCase().includes('topping')).map(option => [Number(option.id), Math.max(1, Math.min(20, Number(option.quantity || 1)))])));
     setQuantity(item?._editLine?.quantity || 1);
   // Preserve the selection during background price refreshes; reset when choices change.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -473,7 +479,7 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
   const availableToppings = (toppingGroup?.options || []).filter(option => optionAvailableForProduct(option, item, variant));
   const availableCrusts = (crustGroup?.options || []).filter(option => optionAvailableForProduct(option, item, variant));
   const selectedCrust = !isPizza || crustId === 'regular' ? null : availableCrusts.find(option => Number(option.id) === Number(crustId));
-  const selectedToppings = availableToppings.filter(option => toppingIds.includes(Number(option.id)));
+  const selectedToppings = availableToppings.filter(option => toppingIds.includes(Number(option.id))).map(option => ({ ...option, quantity: Math.max(1, Math.min(20, Number(toppingQuantities[Number(option.id)] || 1))) }));
 
   function optionPrice(option) {
     if (variant?.name === 'S') return Number(option.small_price ?? option.fixed_price ?? 0);
@@ -483,21 +489,30 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
   }
 
   const selectedOptions = [...(selectedCrust ? [{ ...selectedCrust, group_name: crustGroup?.name || 'Crust' }] : []), ...selectedToppings.map(option => ({ ...option, group_name: toppingGroup?.name || 'Pizza Toppings' }))];
-  const unitPrice = effectiveVariantPrice(item, variant) + selectedOptions.reduce((sum, option) => sum + optionPrice(option), 0);
+  const unitPrice = effectiveVariantPrice(item, variant) + selectedOptions.reduce((sum, option) => sum + optionPrice(option) * Number(option.quantity || 1), 0);
   const optionIds = selectedOptions.map(option => Number(option.id)).sort((a, b) => a - b);
+  const optionSignature = selectedOptions.map(option => `${Number(option.id)}x${Number(option.quantity || 1)}`).sort().join('.');
   const line = {
     ...item,
-    key: `${item.id}:${variant?.id || ''}:${optionIds.join('.')}`,
+    key: `${item.id}:${variant?.id || ''}:${optionSignature}`,
     variant_id: variant?.id || null,
     variant_name: variant?.name || null,
     option_ids: optionIds,
-    options: selectedOptions.map(option => ({ ...option, price: optionPrice(option) })),
+    option_selections: selectedOptions.map(option => ({ id: Number(option.id), quantity: Math.max(1, Math.min(20, Number(option.quantity || 1))) })),
+    options: selectedOptions.map(option => ({ ...option, quantity: Math.max(1, Math.min(20, Number(option.quantity || 1))), price: optionPrice(option) })),
     price: unitPrice,
     quantity
   };
 
   function toggleTopping(id, checked) {
-    setToppingIds(current => checked ? [...current, Number(id)] : current.filter(value => value !== Number(id)));
+    const optionId = Number(id);
+    setToppingIds(current => checked ? [...new Set([...current, optionId])] : current.filter(value => value !== optionId));
+    setToppingQuantities(current => checked ? { ...current, [optionId]: Math.max(1, Number(current[optionId] || 1)) } : Object.fromEntries(Object.entries(current).filter(([key]) => Number(key) !== optionId)));
+  }
+
+  function changeToppingQuantity(id, delta) {
+    const optionId = Number(id);
+    setToppingQuantities(current => ({ ...current, [optionId]: Math.max(1, Math.min(20, Number(current[optionId] || 1) + delta)) }));
   }
 
   function variantLabel(name) {
@@ -525,7 +540,7 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
             <div className="choice-list">
               {variants.map(v => (
                 <label className="choice-row" key={v.id}>
-                  <input type="radio" name="variant" checked={Number(variant?.id) === Number(v.id)} onChange={() => { setVariantId(v.id); setCrustId('regular'); setToppingIds([]); }} />
+                  <input type="radio" name="variant" checked={Number(variant?.id) === Number(v.id)} onChange={() => { setVariantId(v.id); setCrustId('regular'); setToppingIds([]); setToppingQuantities({}); }} />
                   <span>{variantLabel(v.name)}</span>
                   <strong>{inr(effectiveVariantPrice(item, v))}</strong>
                 </label>
@@ -557,13 +572,21 @@ function OptionModal({ item, optionGroups, onClose, onAdd }) {
             <section className="option-section">
               <h3>Choose Toppings</h3>
               <div className="choice-list">
-                {availableToppings.map(option => (
-                  <label className="choice-row" key={option.id}>
-                    <input type="checkbox" checked={toppingIds.includes(Number(option.id))} onChange={e => toggleTopping(option.id, e.target.checked)} />
-                    <span>{option.name}</span>
-                    <strong>+{inr(optionPrice(option))}</strong>
-                  </label>
-                ))}
+                {availableToppings.map(option => {
+                  const selected = toppingIds.includes(Number(option.id));
+                  const toppingQuantity = Math.max(1, Math.min(20, Number(toppingQuantities[Number(option.id)] || 1)));
+                  return <div className="choice-row customer-topping-row" key={option.id}>
+                    <label className="customer-topping-select"><input type="checkbox" checked={selected} onChange={e => toggleTopping(option.id, e.target.checked)} /><span>{option.name}</span></label>
+                    <div className="customer-topping-actions">
+                      <strong>+{inr(optionPrice(option))} each</strong>
+                      {selected ? <div className="customer-option-stepper" aria-label={`${option.name} quantity per pizza`}>
+                        <button type="button" aria-label={`Decrease ${option.name} quantity`} disabled={toppingQuantity <= 1} onClick={() => changeToppingQuantity(option.id, -1)}>−</button>
+                        <span aria-live="polite">{toppingQuantity}</span>
+                        <button type="button" aria-label={`Increase ${option.name} quantity`} disabled={toppingQuantity >= 20} onClick={() => changeToppingQuantity(option.id, 1)}>+</button>
+                      </div> : null}
+                    </div>
+                  </div>;
+                })}
               </div>
             </section>
           </>

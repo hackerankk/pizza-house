@@ -722,6 +722,8 @@ html[data-color-scheme="dark"] .store-status-pill.closed { color: #fca5a5; }
   display: inline-grid;
   grid-template-columns: 34px 34px 34px;
   align-items: center;
+  justify-items: center;
+  box-sizing: border-box;
   text-align: center;
   border: 1px solid var(--border-color);
   border-radius: 999px;
@@ -730,6 +732,8 @@ html[data-color-scheme="dark"] .store-status-pill.closed { color: #fca5a5; }
 }
 
 .quantity-control button {
+  display: grid;
+  place-items: center;
   min-height: 34px;
   width: 34px;
   padding: 0;
@@ -737,6 +741,15 @@ html[data-color-scheme="dark"] .store-status-pill.closed { color: #fca5a5; }
   background: transparent;
   color: var(--primary-color);
   box-shadow: none;
+  line-height: 1;
+}
+
+.quantity-control strong {
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  min-height: 34px;
+  font-variant-numeric: tabular-nums;
 }
 
 .checkout-section { background: color-mix(in srgb, var(--card-color), transparent 50%); }
@@ -3878,6 +3891,7 @@ button.promo-banner-link {
 }
 
 .choice-row {
+  display: grid;
   grid-template-columns: 20px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
@@ -3896,6 +3910,85 @@ button.promo-banner-link {
 .choice-row strong {
   color: var(--primary-color);
   white-space: nowrap;
+}
+
+.staff-option-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  min-width: 0;
+}
+
+.staff-option-label,
+.customer-topping-select {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.staff-option-label span,
+.customer-topping-select span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.staff-option-actions,
+.customer-topping-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  white-space: nowrap;
+}
+
+.staff-option-price,
+.customer-topping-actions strong {
+  color: var(--primary-color);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.staff-option-stepper,
+.customer-option-stepper {
+  display: inline-grid;
+  grid-template-columns: 34px 28px 34px;
+  align-items: center;
+  min-height: 38px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--card-color);
+  text-align: center;
+}
+
+.staff-option-stepper button,
+.customer-option-stepper button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  min-height: 36px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--primary-color);
+  box-shadow: none;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.staff-option-stepper button:disabled,
+.customer-option-stepper button:disabled {
+  cursor: not-allowed;
+  opacity: .38;
+}
+
+.staff-option-stepper span,
+.customer-option-stepper span {
+  color: var(--text-color);
+  font-size: 13px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
 }
 
 .option-modal-footer {
@@ -4517,10 +4610,30 @@ button.promo-banner-link {
   }
   .option-modal-footer {
     grid-template-columns: auto 1fr;
+    padding-bottom: calc(14px + env(safe-area-inset-bottom));
   }
   .option-modal-footer button:last-child {
     grid-column: 1 / -1;
     width: 100%;
+  }
+  .option-modal .staff-option-row,
+  .option-modal .customer-topping-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+  .option-modal .staff-option-actions,
+  .option-modal .customer-topping-actions {
+    justify-content: space-between;
+    padding-left: 26px;
+  }
+  .option-modal .staff-option-stepper,
+  .option-modal .customer-option-stepper {
+    grid-template-columns: 38px 30px 38px;
+  }
+  .option-modal .staff-option-stepper button,
+  .option-modal .customer-option-stepper button {
+    width: 38px;
+    min-height: 40px;
   }
   .staff-payment-options {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -4548,6 +4661,8 @@ button.promo-banner-link {
   .price { font-size: 15px; }
   .choice-row { grid-template-columns: 18px minmax(0, 1fr); }
   .choice-row strong { grid-column: 2; }
+  .option-modal .staff-option-row,
+  .option-modal .customer-topping-row { grid-template-columns: minmax(0, 1fr); }
 }
 
 .order-edit-modal {
