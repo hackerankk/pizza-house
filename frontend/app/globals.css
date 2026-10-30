@@ -3637,9 +3637,8 @@ button.promo-banner-link {
   position: sticky;
   top: calc(var(--customer-sticky-offset, 72px) + 16px);
   height: auto !important;
-  max-height: calc(100vh - var(--customer-sticky-offset, 72px) - 24px);
-  overflow-x: hidden !important;
-  overflow-y: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
   align-content: stretch;
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 14px;
