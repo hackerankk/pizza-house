@@ -269,10 +269,10 @@ function CartPanel({ cart, subtotal, couponCode, onCoupon, onQty, onEdit, onChoo
                 <div className="min-w-0">
                   <strong className="block truncate text-xs leading-tight">{line.name}</strong>
                   {selectionText(line) ? <p className="!mt-0.5 line-clamp-1 !text-xs">{selectionText(line)}</p> : null}
-                  <span className="block !mt-0.5 !text-xs">{inr(line.price)} each</span>
+                  <span className="block !mt-0.5 !text-xs lg:!hidden">{inr(line.price)} each</span>
                   {!line.is_bogo_free ? <button className="ghost lg:!h-6 lg:!min-h-6 lg:!px-2 lg:!py-0 lg:!text-[11px]" onClick={() => onEdit(line)}>Edit size / toppings</button> : null}
                 </div>
-                <div className="grid justify-items-end gap-1">
+                <div className="grid justify-items-end gap-1 lg:!flex lg:!items-center lg:!gap-1">
                   <div className="flex items-center gap-1">
                     <strong className="text-right text-sm">{inr(Number(line.price) * line.quantity)}</strong>
                     <button className="icon-button tiny" onClick={() => onQty(line.key || line.id, -line.quantity)} aria-label={`Remove ${line.name}`}><Trash2 size={14} /></button>

@@ -4868,3 +4868,16 @@ html[data-color-scheme="dark"] button.app-toast-dismiss:hover { background: rgb(
   .admin-topbar .mobile-only, .admin-sidebar .mobile-only { display: inline-flex; }
 }
 html[data-color-scheme="dark"] .stock-note:not(.sold-out) { color: #86efac; }
+
+@media (min-width: 1021px) and (max-height: 760px) {
+  .menu-cart-card {
+    height: auto !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+  }
+
+  .menu-cart-scroll-area {
+    flex: 0 0 auto !important;
+    overflow: visible !important;
+  }
+}
