@@ -259,9 +259,9 @@ function CartPanel({ cart, subtotal, couponCode, onCoupon, onQty, onEdit, onChoo
       </div>
       <div className="menu-cart-scroll-area !min-h-0 !flex-1 !overflow-y-auto pr-1 lg:!h-auto lg:!max-h-none">
         {!cart.length ? <div className="empty-state compact"><ShoppingBag size={24} /><strong>Add something tasty</strong><p>Your selected items will appear here.</p></div> : null}
-        <div className="summary-items compact-cart-list !grid gap-3">
+        <div className="summary-items compact-cart-list !grid gap-3 lg:!gap-1.5">
           {groupedCart.map(({ line, freeLines, unlock }, index) => (
-            <div className="grid gap-2" key={line.key || line.id}>
+            <div className="grid gap-2 lg:!gap-1" key={line.key || line.id}>
               <div className="cart-line !grid !grid-cols-[44px_minmax(0,1fr)_auto] !items-center gap-2 rounded-lg border border-tph-border bg-tph-surface/90 p-1.5">
                 <div className="aspect-square h-11 w-11 overflow-hidden rounded-lg border border-tph-border bg-tph-bg">
                   <OptimizedImage className="h-full w-full object-cover" src={productImage(line, index)} alt={line.name} loading="lazy" />
@@ -270,7 +270,7 @@ function CartPanel({ cart, subtotal, couponCode, onCoupon, onQty, onEdit, onChoo
                   <strong className="block truncate text-xs leading-tight">{line.name}</strong>
                   {selectionText(line) ? <p className="!mt-0.5 line-clamp-1 !text-xs">{selectionText(line)}</p> : null}
                   <span className="block !mt-0.5 !text-xs">{inr(line.price)} each</span>
-                  {!line.is_bogo_free ? <button className="ghost" onClick={() => onEdit(line)}>Edit size / toppings</button> : null}
+                  {!line.is_bogo_free ? <button className="ghost lg:!h-6 lg:!min-h-6 lg:!px-2 lg:!py-0 lg:!text-[11px]" onClick={() => onEdit(line)}>Edit size / toppings</button> : null}
                 </div>
                 <div className="grid justify-items-end gap-1">
                   <div className="flex items-center gap-1">
@@ -308,12 +308,12 @@ function CartPanel({ cart, subtotal, couponCode, onCoupon, onQty, onEdit, onChoo
       </div>
       <div className="menu-cart-footer !shrink-0 lg:!gap-2 lg:!pt-2">
         <input aria-label="Coupon code" maxLength={100} className="lg:!min-h-9 lg:!py-1" placeholder="Coupon code" value={couponCode} onChange={e => onCoupon(e.target.value)} />
-        <div className="totals compact lg:!grid lg:!grid-cols-2 lg:!gap-2">
+        <div className="totals compact lg:!grid lg:!grid-cols-3 lg:!gap-2">
           <div className="menu-cart-total-row lg:!grid lg:!gap-1 lg:!py-1"><span>Subtotal</span><strong>{inr(subtotal)}</strong></div>
           {bogoDiscount > 0 ? <div className="menu-cart-total-row lg:!grid lg:!gap-1 lg:!py-1"><span>BOGO Savings</span><strong>-{inr(bogoDiscount)}</strong></div> : null}
           <div className="menu-cart-total-row lg:!grid lg:!gap-1 lg:!py-1"><span>Coupon</span><strong>Checkout</strong></div>
           <div className="menu-cart-total-row lg:!grid lg:!gap-1 lg:!py-1"><span>Delivery</span><strong>Checkout</strong></div>
-          <div className="grand lg:!col-span-2 lg:!p-2.5"><span>Estimated Total</span><strong>{inr(Math.max(subtotal, 0))}</strong></div>
+          <div className="grand lg:!col-span-3 lg:!p-2.5"><span>Estimated Total</span><strong>{inr(Math.max(subtotal, 0))}</strong></div>
         </div>
         <Link className={cart.length ? 'button full-width cart-checkout-button lg:!min-h-9 lg:!py-1.5 lg:!text-sm' : 'button full-width disabled-link cart-checkout-button lg:!min-h-9 lg:!py-1.5 lg:!text-sm'} href={cart.length ? '/checkout' : '#menu'}>Checkout <ChevronRight size={18} /></Link>
       </div>
